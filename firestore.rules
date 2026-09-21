@@ -1,0 +1,38 @@
+rules_version = '2';
+
+// SoIM CGPA Tracking System — Firestore security rules
+//
+// The app's sign-in screen only gates its own UI. Firestore itself is a
+// public endpoint by default — anyone who knows your project's client
+// config (which is not a secret, and is visible in your deployed page's
+// source, same as any Firebase web app) can talk to it directly unless
+// rules say otherwise. These rules are that "otherwise": every read and
+// write requires a signed-in Firebase Auth user. Deploy this file before
+// you put any real student data in — see SETUP.md, step 4.
+//
+// This intentionally does not check *which* user — it trusts every account
+// that exists in this Firebase project. That is safe only because you
+// create accounts yourself, one at a time, in the Firebase console (see
+// SETUP.md, step 3) rather than enabling public self-signup. If you ever
+// need to restrict further (e.g. to one specific admin email), change the
+// condition below to something like:
+//   allow read, write: if request.auth != null
+//     && request.auth.token.email in ['you@vitrox.edu.my', 'colleague@vitrox.edu.my'];
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /records/{recordId} {
+      allow read, write: if request.auth != null;
+    }
+
+    match /students/{studentId} {
+      allow read, write: if request.auth != null;
+    }
+
+    // Deny everything else by default.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
