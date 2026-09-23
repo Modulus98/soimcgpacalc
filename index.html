@@ -478,6 +478,29 @@ table.data td input, table.data td select {
   position: relative;
 }
 
+/* ---------- Bulk status bar ---------- */
+
+.bulk-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--gold-soft);
+  border: 1px solid var(--gold);
+  border-radius: var(--radius);
+  padding: 9px 14px;
+  margin-bottom: 12px;
+  font-size: 0.85rem;
+  flex-wrap: wrap;
+}
+.bulk-status-bar select {
+  padding: 5px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  font-size: 0.82rem;
+  font-family: inherit;
+}
+table.data td.checkbox-cell, table.data th.checkbox-cell { width: 30px; }
+
 /* ---------- Subject mapping list ---------- */
 
 .mapping-row {
@@ -544,7 +567,7 @@ table.data td input, table.data td select {
 <div class="app-shell" id="app-shell">
 
   <header class="topbar">
-    <div class="brand">SoIM CGPA Tracking<small>Diploma in Business Studies · School of Innovative Management</small></div>
+    <div class="brand">SoIM CGPA Tracking<small>Diploma in Business Studies · School of Industrial Management</small></div>
     <span id="connection-pill">Local mode</span>
     <div class="topbar-actions">
       <button id="export-excel">Export Excel</button>
@@ -576,6 +599,16 @@ table.data td input, table.data td select {
         </div>
       </div>
       <div class="stat-row" id="intake-stats"></div>
+      <div class="bulk-status-bar" id="bulk-status-bar" style="display:none">
+        <span id="bulk-status-count"></span>
+        <select id="bulk-status-select">
+          <option value="withdrawn">Withdrawn</option>
+          <option value="active">Active</option>
+          <option value="graduated">Graduated</option>
+        </select>
+        <button class="btn small primary" id="bulk-status-apply">Apply</button>
+        <button class="btn small" id="bulk-status-clear">Clear selection</button>
+      </div>
       <div class="table-wrap" id="intake-table"></div>
     </section>
 
@@ -831,18 +864,20 @@ function gradingTableFor(gradingVersion) {
 //    other 3 are explained in the Data Audit view). See calc-engine.js.
 // ---------------------------------------------------------------------------
 const ENGINE_CONFIG = {
-  // Corrected by Modulus: MPU (co-curricular) subjects are excluded from
-  // GPA/CGPA starting with the DBS2606 intake onward, not DBS2601 as first
-  // assumed — DBS2601's own sheet excluded MPU too, but that turns out to
-  // have been premature/unofficial at the time, not the actual cutover.
-  // DBS2601 now goes back to including MPU, matching every batch before it.
-  // Every batch is decided independently by this threshold (see
-  // shouldExcludeMPU below), not a single global flag — see Data Audit.
+  // Confirmed by Modulus: DBS2601 excludes MPU as a specific case of its
+  // own, on top of DBS2606 onward being the standing policy — not one
+  // continuous cutoff. So this is two facts, not one threshold: DBS2601's
+  // own sheet excluding MPU turned out to be real, just an early one-off
+  // rather than the start of the ongoing rule, which properly began at
+  // DBS2606. Every batch in between (if any) still includes MPU, same as
+  // everything before DBS2601.
+  mpuExclusionExtraBatches: ['DBS2601'],
   mpuExclusionStartsAtBatch: 2606,
   totalCreditsRequired: 90,
 };
 
 function shouldExcludeMPU(batch, config = ENGINE_CONFIG) {
+  if ((config.mpuExclusionExtraBatches || []).includes(batch)) return true;
   const match = String(batch || '').match(/(\d{4})$/);
   if (!match) return false;
   return Number(match[1]) >= config.mpuExclusionStartsAtBatch;
@@ -1324,7 +1359,10 @@ function renderIntakeTabs() {
   }).join('') + `<button class="intake-tab${state.view === 'audit' ? ' active' : ''}" data-audit="1">Data Audit</button>`;
 
   wrap.querySelectorAll('[data-batch]').forEach(btn => {
-    btn.addEventListener('click', () => setView('intake', { batch: btn.dataset.batch }));
+    btn.addEventListener('click', () => {
+      if (btn.dataset.batch !== state.batch) selectedStudentIds.clear();
+      setView('intake', { batch: btn.dataset.batch });
+    });
   });
   wrap.querySelector('[data-audit]').addEventListener('click', () => setView('audit'));
 }
@@ -1392,6 +1430,7 @@ function renderIntakeView() {
 
   const thead = `
     <tr>
+      <th class="checkbox-cell"><input type="checkbox" id="select-all-checkbox"></th>
       <th>Student's Name</th><th>Student ID</th><th>Status</th>
       <th>Total Cum GP</th><th>Total Cum GP (excl. repeat)</th>
       <th>Total Cum Ct</th><th>Total Cum Ct (excl. repeat)</th>
@@ -1406,6 +1445,7 @@ function renderIntakeView() {
     const pill = s.eligibility === 'Eligible'
       ? `<span class="pill good">Eligible</span>` : `<span class="pill warn">Not Eligible</span>`;
     return `<tr class="clickable" data-student="${r.studentId}">
+      <td class="checkbox-cell" data-no-nav="1"><input type="checkbox" class="row-select" data-student="${r.studentId}" ${selectedStudentIds.has(r.studentId) ? 'checked' : ''}></td>
       <td class="name-cell"><button>${escapeHtml(r.name)}</button></td>
       <td>${r.studentId}</td>
       <td>${statusPill(r.status)}</td>
@@ -1427,8 +1467,35 @@ function renderIntakeView() {
   if (clearBtn) clearBtn.addEventListener('click', () => { document.getElementById('status-filter').value = 'all'; renderIntakeView(); });
 
   document.querySelectorAll('#intake-table tr[data-student]').forEach(tr => {
-    tr.addEventListener('click', () => setView('student', { studentId: tr.dataset.student }));
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('[data-no-nav]')) return;
+      setView('student', { studentId: tr.dataset.student });
+    });
   });
+
+  document.querySelectorAll('#intake-table .row-select').forEach(cb => {
+    cb.addEventListener('change', () => {
+      if (cb.checked) selectedStudentIds.add(cb.dataset.student);
+      else selectedStudentIds.delete(cb.dataset.student);
+      updateBulkStatusBar();
+    });
+  });
+  const selectAll = document.getElementById('select-all-checkbox');
+  if (selectAll) {
+    selectAll.checked = students.length > 0 && students.every(s => selectedStudentIds.has(s.studentId));
+    selectAll.addEventListener('change', () => {
+      students.forEach(s => selectAll.checked ? selectedStudentIds.add(s.studentId) : selectedStudentIds.delete(s.studentId));
+      renderIntakeView();
+    });
+  }
+  updateBulkStatusBar();
+}
+
+function updateBulkStatusBar() {
+  const bar = document.getElementById('bulk-status-bar');
+  const n = selectedStudentIds.size;
+  bar.style.display = n ? 'flex' : 'none';
+  if (n) document.getElementById('bulk-status-count').textContent = `${n} student${n === 1 ? '' : 's'} selected — set status to:`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1490,6 +1557,7 @@ function renderStudentView() {
 
 // One record row can be in "editing" mode at a time.
 let editingRecordId = null;
+const selectedStudentIds = new Set();
 
 function renderRecordRow(r) {
   const isRetake = r.needRetake === 1 || r.needRetake === true;
@@ -1585,6 +1653,11 @@ function wireRecordRowEvents() {
 function renderAuditView() {
   document.getElementById('audit-list').innerHTML = `
     <div class="audit-item">
+      <strong>Corrected: "School of Industrial Management"</strong><span class="tag">Fixed</span>
+      <p>The header briefly read "School of Innovative Management" — corrected to the actual name,
+      School of Industrial Management.</p>
+    </div>
+    <div class="audit-item">
       <strong>New: subject code &amp; credit-hour mapping</strong><span class="tag">Added</span>
       <p>Settings now has an upload for curriculum changes — a subject's code getting renamed, or its credit
       hours changing. Upload a small "old code → new code (+ new credit hour)" spreadsheet and the app
@@ -1597,16 +1670,17 @@ function renderAuditView() {
       mapped version, so correcting a typo can't accidentally bake a rename into history.</p>
     </div>
     <div class="audit-item">
-      <strong>MPU policy — corrected to DBS2606</strong><span class="tag">Resolved</span>
-      <p>MPU (co-curricular) subjects are excluded from GPA/CGPA starting with the <strong>DBS2606</strong>
-      intake onward — corrected from an earlier DBS2601 assumption. DBS2601's own sheet excluded MPU too,
-      which is what led to that first guess, but that turns out to have been premature at the time rather
-      than the real cutover, so DBS2601 now goes back to including MPU like every batch before it. Its 3
-      students do have real MPU records (MPU2113 in semester 1), so this isn't just a cosmetic threshold
-      change — their GPA/CGPA figures shift accordingly. This is decided per batch (any future intake
-      numbered 2606 or later automatically gets the new rule), not a single on/off switch. MPU credit hours
-      still count toward the 90-credit graduation requirement regardless of this setting — only GPA/CGPA is
-      affected.</p>
+      <strong>MPU policy — two separate facts, not one cutoff</strong><span class="tag">Resolved</span>
+      <p>This took a couple of rounds to land on, so here's the final shape: <strong>DBS2601</strong> excludes
+      MPU as a one-off case of its own — its own sheet always excluded MPU, and that turns out to have been
+      real rather than premature after all. Separately, the standing policy of excluding MPU properly began
+      at <strong>DBS2606</strong> onward. These are two independent facts, not one "from X onward" rule — any
+      batch between DBS2601 and DBS2606 (if one exists) still includes MPU, same as everything before
+      DBS2601. DBS2601's 3 students do have real MPU records (MPU2113 in semester 1), so this isn't a
+      cosmetic change — their GPA/CGPA shift depending on which way this is set, and re-validating against
+      all 35 published students with the current rule in place gives an exact match on 32, with the
+      remaining 3 being the two spreadsheet bugs below, not a policy disagreement. MPU credit hours count
+      toward the 90-credit graduation requirement regardless of any of this — only GPA/CGPA is affected.</p>
     </div>
     <div class="audit-item">
       <strong>3 students were missing from their intake's summary sheet</strong><span class="tag">Fixed</span>
@@ -1673,6 +1747,23 @@ function renderAuditView() {
       one. The new scale's Achievement label (Distinction / Merit / Pass / Fail) now shows under the grade
       for any result graded under it, and the Excel export's Grading sheet lists both scales side by side,
       labelled by which one applies.</p>
+    </div>
+    <div class="audit-item">
+      <strong>Withdrawn students now excluded from exports too</strong><span class="tag">Fixed</span>
+      <p>The on-screen intake table already defaulted to hiding withdrawn students, but Excel and PDF
+      exports didn't follow that — they pulled every student regardless of status. Now both exclude
+      anyone marked Withdrawn, same as the default screen view. Graduated students are still included in
+      exports; only Withdrawn is dropped, since a graduated student's record is still meaningful and a
+      withdrawn one generally isn't. Nothing about the underlying stored record changes — set someone back
+      to Active or Graduated and they reappear in exports immediately.</p>
+    </div>
+    <div class="audit-item">
+      <strong>New: select multiple students to set status in bulk</strong><span class="tag">Added</span>
+      <p>Each intake table now has a checkbox per row (and a "select all" in the header). Select any number
+      of students, pick Active / Withdrawn / Graduated from the bar that appears, and apply it to all of
+      them at once — no need to open each student's page individually anymore, though that still works too
+      for one at a time. Selection clears when you switch intake or change the status filter, so it can't
+      silently carry over to a different set of students than you were looking at.</p>
     </div>
     <div class="audit-item">
       <strong>New: retake count per subject</strong><span class="tag">Added</span>
@@ -1833,7 +1924,22 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   document.getElementById('back-to-intake').addEventListener('click', () => setView('intake'));
-  document.getElementById('status-filter').addEventListener('change', renderIntakeView);
+  document.getElementById('status-filter').addEventListener('change', () => { selectedStudentIds.clear(); renderIntakeView(); });
+
+  document.getElementById('bulk-status-clear').addEventListener('click', () => { selectedStudentIds.clear(); renderIntakeView(); });
+  document.getElementById('bulk-status-apply').addEventListener('click', async () => {
+    const status = document.getElementById('bulk-status-select').value;
+    const ids = [...selectedStudentIds];
+    if (!ids.length) return;
+    if (status !== 'active' && !confirm(`Mark ${ids.length} student${ids.length === 1 ? '' : 's'} as ${STATUS_LABEL[status]}?`)) return;
+    let done = 0, failed = 0;
+    for (const id of ids) {
+      try { await Store.setStatus(id, status); done++; } catch (e) { failed++; }
+    }
+    selectedStudentIds.clear();
+    showToast(failed ? `Updated ${done}, ${failed} failed — check your connection and try again.` : `Marked ${done} student${done === 1 ? '' : 's'} as ${STATUS_LABEL[status]}.`, !!failed);
+    render();
+  });
 
   // Sign-in screen
   document.getElementById('signin-form').addEventListener('submit', async (e) => {
@@ -2269,7 +2375,10 @@ function exportExcel() {
   const batches = getBatches();
 
   for (const batch of batches) {
-    const students = getStudentsInBatch(batch);
+    // Withdrawn students are excluded here — their results are no longer
+    // significant once withdrawn, matching the default on-screen view.
+    // Graduated students are still included; only withdrawn is dropped.
+    const students = getStudentsInBatch(batch).filter(s => s.status !== 'withdrawn');
     const rows = students.map(s => {
       const sum = computeStudentSummary(s.records);
       const row = {
@@ -2334,7 +2443,7 @@ function styleHeaderRow(ws, colCount) {
 function exportPDF(batch) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation: 'landscape' });
-  const students = getStudentsInBatch(batch);
+  const students = getStudentsInBatch(batch).filter(s => s.status !== 'withdrawn');
   const rows = students.map(s => {
     const sum = computeStudentSummary(s.records);
     return [
@@ -2346,7 +2455,7 @@ function exportPDF(batch) {
   doc.setFontSize(14);
   doc.text(`SoIM CGPA Tracking — ${batch}`, 14, 15);
   doc.setFontSize(9);
-  doc.text(`Generated ${new Date().toLocaleDateString()}`, 14, 21);
+  doc.text(`Generated ${new Date().toLocaleDateString()} · withdrawn students excluded`, 14, 21);
   doc.autoTable({
     startY: 26,
     head: [['Name', 'Student ID', 'Status', 'Total Cum GP', 'Total Cum GP (excl. repeat)', 'Total Cum Ct', 'Total Cum Ct (excl. repeat)', 'CGPA Temp', 'CGPA Final', 'Eligibility', 'Repeats needed']],
