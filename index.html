@@ -568,7 +568,7 @@ table.data td.checkbox-cell, table.data th.checkbox-cell { width: 30px; }
 <div id="signin-screen" class="signin-screen">
   <form class="signin-card" id="signin-form">
     <h1 class="brand" style="color:var(--ink)">SoIM CGPA Tracking</h1>
-    <p class="sub">Sign in with your admin account to continue.</p>
+    <p class="sub">Sign in with your admin or viewer account to continue.</p>
     <button class="btn" type="button" id="google-signin-btn" style="width:100%;margin-bottom:14px">Sign in with Google</button>
     <div class="signin-divider"><span>or</span></div>
     <div class="field">
@@ -729,7 +729,7 @@ table.data td.checkbox-cell, table.data th.checkbox-cell { width: 30px; }
       <label>Firebase project config (paste the <code>firebaseConfig</code> object from your Firebase console, as JSON)</label>
       <textarea id="firebase-config-input" placeholder='{"apiKey":"...","authDomain":"...","projectId":"...","storageBucket":"...","messagingSenderId":"...","appId":"..."}'></textarea>
     </div>
-    <p class="note">Once connected, every add/edit/remove writes straight to Firestore in real time, and every browser pointed at the same config sees the same live data. This screen only appears after you sign in with an admin account — but that sign-in only protects the app's own screens. The database itself is only as safe as your Firestore rules, so deploy the included <code>firestore.rules</code> before you put any real student data in — it's now written to restrict access to the two emails below it, not just "any signed-in account." See SETUP.md for the full walkthrough.</p>
+    <p class="note">Once connected, every add/edit/remove writes straight to Firestore in real time, and every browser pointed at the same config sees the same live data. This screen only appears after you sign in with an allowed account — but that sign-in only protects the app's own screens. The database itself is only as safe as your Firestore rules, so deploy the included <code>firestore.rules</code> before you put any real student data in — it now restricts writes to your Admin emails and read access to Admin or Viewer emails, not just "any signed-in account." See SETUP.md for the full walkthrough.</p>
     <div class="modal-actions">
       <button class="btn" id="disconnect-firebase">Use local mode</button>
       <button class="btn primary" id="connect-firebase">Connect</button>
