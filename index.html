@@ -90,6 +90,20 @@ button {
   min-height: 1.1em;
   margin: 0 0 8px;
 }
+.signin-divider {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.76rem;
+  margin: 4px 0 14px;
+}
+.signin-divider::before, .signin-divider::after {
+  content: '';
+  flex: 1;
+  border-bottom: 1px solid var(--line);
+}
+.signin-divider span { padding: 0 10px; }
 
 .linklike {
   background: none; border: none; padding: 0;
@@ -550,6 +564,8 @@ table.data td.checkbox-cell, table.data th.checkbox-cell { width: 30px; }
   <form class="signin-card" id="signin-form">
     <h1 class="brand" style="color:var(--ink)">SoIM CGPA Tracking</h1>
     <p class="sub">Sign in with your admin account to continue.</p>
+    <button class="btn" type="button" id="google-signin-btn" style="width:100%;margin-bottom:14px">Sign in with Google</button>
+    <div class="signin-divider"><span>or</span></div>
     <div class="field">
       <label for="signin-email">Email</label>
       <input type="email" id="signin-email" autocomplete="username" required>
@@ -572,7 +588,7 @@ table.data td.checkbox-cell, table.data th.checkbox-cell { width: 30px; }
     <div class="topbar-actions">
       <button id="export-excel">Export Excel</button>
       <button id="export-pdf">Export PDF</button>
-      <button class="disabled-feature" disabled title="Coming soon — send a sample CMS result-slip PDF to enable this">Import PDF (soon)</button>
+      <button id="open-pdf-import" class="primary">Import PDF</button>
       <button id="open-settings" class="primary">Settings</button>
       <button id="sign-out" style="display:none">Sign out</button>
     </div>
@@ -685,10 +701,24 @@ table.data td.checkbox-cell, table.data th.checkbox-cell { width: 30px; }
     <h3>Settings</h3>
 
     <div class="field">
+      <label>Google sign-in — allowed emails (one per line)</label>
+      <textarea id="google-allowlist-input" style="min-height:70px" placeholder="you@gmail.com&#10;colleague@gmail.com"></textarea>
+    </div>
+    <p class="note">This is a convenience check only — it signs someone straight back out with a clear message
+    if their Google account isn't listed here, so they're not left staring at a broken screen. It is
+    <strong>not</strong> what actually secures anything. The real restriction has to live in your Firestore
+    rules (below) with the same two emails, since rules run on Firebase's servers and this list only runs in
+    the browser. Keep both lists in sync — update one, update the other.</p>
+    <div class="modal-actions">
+      <button class="btn primary" id="save-google-allowlist">Save allowed emails</button>
+    </div>
+
+    <hr style="margin:18px 0;border:none;border-top:1px solid var(--line)">
+    <div class="field">
       <label>Firebase project config (paste the <code>firebaseConfig</code> object from your Firebase console, as JSON)</label>
       <textarea id="firebase-config-input" placeholder='{"apiKey":"...","authDomain":"...","projectId":"...","storageBucket":"...","messagingSenderId":"...","appId":"..."}'></textarea>
     </div>
-    <p class="note">Once connected, every add/edit/remove writes straight to Firestore in real time, and every browser pointed at the same config sees the same live data. This screen only appears after you sign in with an admin account — but that sign-in only protects the app's own screens. The database itself is only as safe as your Firestore rules, so deploy the included <code>firestore.rules</code> (requires <code>request.auth != null</code>) before you put any real student data in. See SETUP.md for the full walkthrough, including creating admin accounts.</p>
+    <p class="note">Once connected, every add/edit/remove writes straight to Firestore in real time, and every browser pointed at the same config sees the same live data. This screen only appears after you sign in with an admin account — but that sign-in only protects the app's own screens. The database itself is only as safe as your Firestore rules, so deploy the included <code>firestore.rules</code> before you put any real student data in — it's now written to restrict access to the two emails below it, not just "any signed-in account." See SETUP.md for the full walkthrough.</p>
     <div class="modal-actions">
       <button class="btn" id="disconnect-firebase">Use local mode</button>
       <button class="btn primary" id="connect-firebase">Connect</button>
@@ -722,10 +752,11 @@ table.data td.checkbox-cell, table.data th.checkbox-cell { width: 30px; }
 
     <hr style="margin:18px 0;border:none;border-top:1px solid var(--line)">
     <h3 style="margin-bottom:4px">Firestore security rules</h3>
-    <p class="note">This is what actually protects the data — the sign-in screen alone does not. Paste this into
-    <strong>Firebase Console → Firestore Database → Rules</strong> and click Publish, before you put any real
-    student data in. Safe to leave visible here — these rules aren't a secret, they're what enforces that only a
-    signed-in admin account can read or write anything.</p>
+    <p class="note">This is what actually protects the data — the sign-in screen and the allowed-emails list
+    above are both just app-side convenience. Paste this into
+    <strong>Firebase Console → Firestore Database → Rules</strong>, replace the two placeholder emails with
+    your real two Gmail addresses, and click Publish, before you put any real student data in. Safe to leave
+    visible here — these rules aren't a secret, they're what enforces the restriction.</p>
     <textarea id="rules-display" readonly style="min-height:280px;font-size:0.74rem">rules_version = '2';
 
 // SoIM CGPA Tracking System — Firestore security rules
@@ -734,32 +765,38 @@ table.data td.checkbox-cell, table.data th.checkbox-cell { width: 30px; }
 // public endpoint by default — anyone who knows your project's client
 // config (which is not a secret, and is visible in your deployed page's
 // source, same as any Firebase web app) can talk to it directly unless
-// rules say otherwise. These rules are that "otherwise": every read and
-// write requires a signed-in Firebase Auth user. Deploy this before you
-// put any real student data in.
+// rules say otherwise. These rules are that "otherwise".
 //
-// This intentionally does not check *which* user — it trusts every account
-// that exists in this Firebase project. That is safe only because you
-// create accounts yourself, one at a time, in the Firebase console (see
-// SETUP.md, step 3) rather than enabling public self-signup. If you ever
-// need to restrict further (e.g. to one specific admin email), change the
-// condition below to something like:
-//   allow read, write: if request.auth != null
-//     &amp;&amp; request.auth.token.email in ['you@vitrox.edu.my', 'colleague@vitrox.edu.my'];
+// EDIT THIS: replace the two placeholder emails below with your actual two
+// Gmail addresses before publishing. Every read and write requires being
+// signed in AND matching one of these emails exactly (lowercase) — this is
+// what actually restricts access to just the two of you, not the app's
+// Google sign-in button, which only checks the same list client-side for a
+// friendlier error message. Keep this list and the app's Settings ->
+// "Google sign-in — allowed emails" list in sync; update both whenever the
+// two people change.
 
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    function isAllowed() {
+      return request.auth != null
+        &amp;&amp; request.auth.token.email in [
+          'you@gmail.com',
+          'colleague@gmail.com'
+        ];
+    }
+
     match /records/{recordId} {
-      allow read, write: if request.auth != null;
+      allow read, write: if isAllowed();
     }
 
     match /students/{studentId} {
-      allow read, write: if request.auth != null;
+      allow read, write: if isAllowed();
     }
 
     match /subjectMappings/{mappingId} {
-      allow read, write: if request.auth != null;
+      allow read, write: if isAllowed();
     }
 
     // Deny everything else by default.
@@ -791,6 +828,22 @@ service cloud.firestore {
   </div>
 </div>
 
+<div class="modal-backdrop" id="pdf-import-modal">
+  <div class="modal" style="position:relative;max-width:820px">
+    <button class="modal-close" data-close-modal>&times;</button>
+    <h3>Import CMS result summary (PDF)</h3>
+    <p class="note">Upload a "Student Result Summary" PDF exported from the CMS. Marks, grade and credit
+    hour are read straight from it; semester is derived from each student's batch and the exam period shown
+    on the PDF (editable below in case that guess is ever wrong for an unusual case). Nothing is saved until
+    you review the preview and confirm.</p>
+    <div class="field">
+      <label for="pdf-file-input">PDF file</label>
+      <input type="file" id="pdf-file-input" accept="application/pdf">
+    </div>
+    <div id="pdf-import-preview"></div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/10.13.1/firebase-app-compat.min.js"></script>
@@ -799,6 +852,7 @@ service cloud.firestore {
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
 'use strict';
 /* ============================================================================
@@ -1156,6 +1210,19 @@ const Store = {
     }
   },
 
+  // Google sign-in allowlist — purely local (per-browser), purely a UX
+  // convenience so a rejected sign-in gets a clear message instead of a
+  // silently broken app. Never the actual security boundary — that's
+  // firestore.rules, which runs on Firebase's servers and can't be reached
+  // by editing anything in this browser.
+  getGoogleAllowlist() {
+    try { return JSON.parse(localStorage.getItem('soim_google_allowlist') || '[]'); }
+    catch (e) { return []; }
+  },
+  setGoogleAllowlist(emails) {
+    localStorage.setItem('soim_google_allowlist', JSON.stringify(emails));
+  },
+
   // Upserts by oldCode: re-uploading a mapping for a code that's already
   // mapped replaces it rather than creating a duplicate.
   async upsertSubjectMapping(mapping) {
@@ -1224,6 +1291,26 @@ const Auth = {
     await this.authInstance.signInWithEmailAndPassword(email, password);
   },
 
+  // Signs in with Google, then checks the result against the local
+  // allowlist (see Store.getGoogleAllowlist). A rejection here signs the
+  // person back out immediately — Firestore would refuse them anyway once
+  // firestore.rules has the same two emails, but this gives an actual
+  // explanation instead of a page full of silent permission errors.
+  async signInWithGoogle() {
+    if (!this.authInstance) throw new Error('Connect a Firebase project in Settings first.');
+    const provider = new firebase.auth.GoogleAuthProvider();
+    const result = await this.authInstance.signInWithPopup(provider);
+    const email = (result.user.email || '').toLowerCase();
+    const allowlist = Store.getGoogleAllowlist();
+    if (!allowlist.length || !allowlist.includes(email)) {
+      await this.authInstance.signOut();
+      const err = new Error(`${email} isn't on the allowed list for this app.`);
+      err.code = 'allowlist/denied';
+      err.deniedEmail = email;
+      throw err;
+    }
+  },
+
   async signOut() {
     if (this.authInstance) await this.authInstance.signOut();
   },
@@ -1231,6 +1318,8 @@ const Auth = {
 
 function humanizeAuthError(err) {
   const code = err && err.code;
+  if (code === 'allowlist/denied') return `${err.deniedEmail} isn't authorized for this app. Ask an admin to add it in Settings (and in firestore.rules), or sign in with a different account.`;
+  if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') return '';
   if (code === 'auth/invalid-email') return 'That doesn\u2019t look like a valid email.';
   if (code === 'auth/user-not-found' || code === 'auth/wrong-password' || code === 'auth/invalid-credential') return 'Email or password is incorrect.';
   if (code === 'auth/too-many-requests') return 'Too many attempts — wait a moment and try again.';
@@ -1653,6 +1742,30 @@ function wireRecordRowEvents() {
 function renderAuditView() {
   document.getElementById('audit-list').innerHTML = `
     <div class="audit-item">
+      <strong>New: import results straight from the CMS "Student Result Summary" PDF</strong><span class="tag">Added</span>
+      <p>The "Import PDF" button reads a CMS result-summary export directly — no manual retyping. It also
+      answers the earlier open question about the retake cap: the PDF has separate Total CW and Total FE
+      columns the spreadsheet never had, and comparing the PDF's own stated grade against the natural grade
+      for those marks tells the app definitively whether that attempt was capped, rather than guessing.
+      Semester isn't in the PDF at all, so it's derived from each student's batch and the exam period shown
+      (validated 7-for-7 against real existing records, including a case where the same exam period landed
+      on two different semesters for two different intakes) — shown editable in the preview since it's a
+      formula guess, not something the PDF states outright. A result already on file with the same marks is
+      skipped rather than duplicated. Every new import is tagged with the current (June 2026) grading scale,
+      same as any other new entry.</p>
+    </div>
+    <div class="audit-item">
+      <strong>New: Google sign-in, restricted to specific emails</strong><span class="tag">Added</span>
+      <p>The sign-in screen now has a "Sign in with Google" button alongside the existing email/password
+      form — either still works. Restricting it to specific people is two separate settings that need to
+      match: Settings → "Google sign-in — allowed emails" is a client-side list that signs someone straight
+      back out with a clear message if they're not on it, and <code>firestore.rules</code> now has the same
+      check built in as the real enforcement (edit its two placeholder emails to your actual ones before
+      publishing). The Settings list alone changes nothing about security by itself — it only makes a
+      rejection clear instead of a page full of confusing "permission denied" errors once the rules reject
+      someone anyway.</p>
+    </div>
+    <div class="audit-item">
       <strong>Corrected: "School of Industrial Management"</strong><span class="tag">Fixed</span>
       <p>The header briefly read "School of Innovative Management" — corrected to the actual name,
       School of Industrial Management.</p>
@@ -1954,6 +2067,15 @@ document.addEventListener('DOMContentLoaded', () => {
       errEl.textContent = humanizeAuthError(err);
     }
   });
+  document.getElementById('google-signin-btn').addEventListener('click', async () => {
+    const errEl = document.getElementById('signin-error');
+    errEl.textContent = '';
+    try {
+      await Auth.signInWithGoogle();
+    } catch (err) {
+      errEl.textContent = humanizeAuthError(err);
+    }
+  });
   document.getElementById('skip-to-local').addEventListener('click', () => {
     Store.disconnectFirebase();
     render();
@@ -1968,14 +2090,32 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('open-settings').addEventListener('click', () => {
     document.getElementById('firebase-config-input').value =
       localStorage.getItem('soim_firebase_config') || '';
+    document.getElementById('google-allowlist-input').value = Store.getGoogleAllowlist().join('\n');
     renderMappingsList();
     const batchSelect = document.getElementById('bulk-export-batch');
     batchSelect.innerHTML = getBatches().map(b => `<option value="${b}">${b}</option>`).join('');
     if (state.batch) batchSelect.value = state.batch;
     settingsModal.classList.add('open');
   });
+  document.getElementById('save-google-allowlist').addEventListener('click', () => {
+    const emails = document.getElementById('google-allowlist-input').value
+      .split('\n').map(s => s.trim().toLowerCase()).filter(Boolean);
+    Store.setGoogleAllowlist(emails);
+    showToast(emails.length ? `Saved ${emails.length} allowed email${emails.length === 1 ? '' : 's'}.` : 'Allowlist cleared — Google sign-in will reject everyone until you add at least one email.');
+  });
   document.querySelectorAll('[data-close-modal]').forEach(el =>
-    el.addEventListener('click', () => settingsModal.classList.remove('open')));
+    el.addEventListener('click', () => el.closest('.modal-backdrop').classList.remove('open')));
+
+  const pdfModal = document.getElementById('pdf-import-modal');
+  document.getElementById('open-pdf-import').addEventListener('click', () => {
+    document.getElementById('pdf-import-preview').innerHTML = '';
+    document.getElementById('pdf-file-input').value = '';
+    pdfModal.classList.add('open');
+  });
+  document.getElementById('pdf-file-input').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) handlePdfResultFile(file);
+  });
 
   document.getElementById('connect-firebase').addEventListener('click', () => {
     const raw = document.getElementById('firebase-config-input').value.trim();
@@ -2365,6 +2505,238 @@ function renderResultsPreview(plan) {
     showToast(failed ? `Applied ${done}, ${failed} failed — check your connection and try those rows again.` : `Applied ${done} change${done === 1 ? '' : 's'}.`, !!failed);
     render();
   });
+}
+
+// ---------------------------------------------------------------------------
+// 9d. PDF IMPORT — "Student Result Summary" exports from the CMS
+// ---------------------------------------------------------------------------
+// Validated against 7 real records already in the system (matching PDF
+// supplied 25 Sep 2026): Total Marks, the derived semester, and the
+// needRetake-via-grade-comparison approach below all matched 7/7, including
+// the key cross-batch case (the same exam period landing on a different
+// semester number for two different intakes). Semester is still shown as
+// editable in the preview, since the derivation is a formula guess, not
+// something the PDF states directly, and it's the one field with no
+// external confirmation beyond this single sample.
+
+// Set lazily, inside extractTextFromPDF, rather than unconditionally at
+// module-load time: if pdf.js failed to load from the CDN for any reason
+// (network hiccup, an ad-blocker, offline use), touching pdfjsLib here
+// would throw immediately — and since this file is one script, that throw
+// would abort every later top-level const/let in the whole app, not just
+// PDF import. Isolating it to inside the function means a CDN failure only
+// breaks PDF import, caught below, instead of the entire app.
+async function extractTextFromPDF(file) {
+  if (typeof pdfjsLib === 'undefined') throw new Error('The PDF reader library didn\u2019t load — check your internet connection and try again.');
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let fullText = '';
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    fullText += content.items.map(item => item.str).join(' ') + '\n';
+  }
+  return fullText;
+}
+
+// Parses the CMS's "Student Result Summary" export. Anchors each row on its
+// Student Number (a reliable, distinctively-formatted token) rather than on
+// line breaks or the row's own sequence number, because a long student name
+// wrapping inside its PDF table cell also wraps in the extracted text,
+// breaking any line-based approach.
+function parseResultSummaryPDF(rawText) {
+  const text = rawText.replace(/\s+/g, ' ').trim();
+
+  const headerMatch = text.match(/([A-Za-z]+ \d{4})\s*-\s*([A-Z]{2,5}\d{3,5})\s*-\s*(.+?)\s*-\s*([A-Za-z]+)\s*\(([^)]+)\)/);
+  if (!headerMatch) throw new Error('Could not find the exam period / subject header line (expected something like "January 2026 - FFI2213 - Fundamentals of Finance - DBS (Lecturer Name)").');
+  const [, examPeriod, subjectCode, subjectName, program, lecturer] = headerMatch;
+
+  const afterHeaderRow = text.split(/Number\s+Student Name\s+Exam Status\s+Total CW\s+Total FE\s+Total Marks\s+Grade\s+Grade Point\s+Attempt/i)[1];
+  if (!afterHeaderRow) throw new Error('Could not find the table header row (expected "Student Name / Exam Status / Total CW / Total FE / Total Marks / Grade / Grade Point / Attempt"). Is this a "Student Result Summary" export?');
+
+  const KNOWN_STATUSES = ['ABSENT', 'BARRED', 'DEFERRED', 'WITHDRAWN', 'EXEMPTED', 'INCOMPLETE'];
+  const STUDENT_NUMBER_RE = /\b([A-Z]{2,5}\d{4,8})\b/g;
+
+  const anchors = [...afterHeaderRow.matchAll(STUDENT_NUMBER_RE)];
+  const rows = [];
+  const errors = [];
+
+  for (let i = 0; i < anchors.length; i++) {
+    const studentId = anchors[i][1];
+    const start = anchors[i].index + studentId.length;
+    const end = i + 1 < anchors.length ? anchors[i + 1].index : afterHeaderRow.length;
+    const chunk = afterHeaderRow.slice(start, end).trim();
+
+    // Not anchored to end-of-chunk: the chunk also has the *next* row's
+    // leading row-number stuck on the end (e.g. "...3.00 1 2" right before
+    // the next Student Number), so anchoring to $ would swallow that "2"
+    // and fail to match at all.
+    const tailMatch = chunk.match(/(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+)\s+([A-F][+-]?)\s+(\d+\.\d+)\s+(\d+)/);
+    if (!tailMatch) {
+      errors.push(`Could not read the result fields for ${studentId} — raw text: "${chunk}"`);
+      continue;
+    }
+    const [, totalCW, totalFE, totalMarks, grade, gradePoint, attempt] = tailMatch;
+    let namePart = chunk.slice(0, tailMatch.index).trim();
+
+    let examStatus = '';
+    for (const status of KNOWN_STATUSES) {
+      const re = new RegExp(`\\b${status}\\b\\s*$`, 'i');
+      if (re.test(namePart)) { examStatus = status; namePart = namePart.replace(re, '').trim(); break; }
+    }
+    namePart = namePart.replace(/^\d+\s+/, '').trim();
+
+    rows.push({
+      studentId,
+      batch: studentId.match(/^[A-Z]+\d{4}/)?.[0] || '',
+      name: namePart,
+      examStatus,
+      totalCW: Number(totalCW),
+      totalFE: Number(totalFE),
+      marks: Number(totalMarks),
+      pdfGrade: grade,
+      pdfGradePoint: Number(gradePoint),
+      attempt: Number(attempt),
+    });
+  }
+
+  return { examPeriod, subjectCode, subjectName, program, lecturer, rows, errors };
+}
+
+const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+
+// A batch's own start month is when it began semester 1; each semester is a
+// 3-calendar-month block, with the exam falling in the month right after
+// that block ends. Validated against 7 real (batch, exam period) -> semester
+// pairs across two different intakes sitting the same exam period — see the
+// note at the top of this section.
+function deriveSemesterFromBatchAndPeriod(batch, examPeriod) {
+  const bm = String(batch).match(/(\d{2})(\d{2})$/);
+  const [monthName, yearStr] = String(examPeriod).trim().split(/\s+/);
+  const examMonthIdx = MONTH_NAMES.indexOf(String(monthName).toLowerCase());
+  if (!bm || examMonthIdx === -1 || !yearStr) return null;
+  const batchYear = 2000 + Number(bm[1]), batchMonth = Number(bm[2]);
+  const examYear = Number(yearStr), examMonth = examMonthIdx + 1;
+  const elapsed = (examYear * 12 + examMonth) - (batchYear * 12 + batchMonth);
+  if (elapsed <= 0) return null;
+  return Math.ceil(elapsed / 3);
+}
+
+let pendingPdfPlan = null;
+
+function buildPdfResultsPlan(header) {
+  const creditHour = creditHourFromSubjectCode(header.subjectCode);
+  const gradingTable = GRADING_TABLE_JUN2026; // any *new* import is "from now on" — see grading-scale versioning above
+  const plan = { toAdd: [], toSkipDuplicate: [], errors: [...header.errors] };
+
+  for (const row of header.rows) {
+    const semester = deriveSemesterFromBatchAndPeriod(row.batch, header.examPeriod);
+    if (semester == null) {
+      plan.errors.push(`${row.studentId}: couldn't work out which semester this is (batch "${row.batch}", exam period "${header.examPeriod}") — check both look right, or set it manually after importing.`);
+      continue;
+    }
+
+    const validationError = validateRecordInput({ semester, subjectCode: header.subjectCode, creditHour, marks: row.marks });
+    if (validationError) { plan.errors.push(`${row.studentId}: ${validationError}`); continue; }
+
+    // Duplicate-import guard: the exact same result already on file.
+    const exactDuplicate = Store.records.find(r =>
+      r.studentId === row.studentId && r.subjectCode === header.subjectCode &&
+      r.semester === semester && r.marks === row.marks);
+    if (exactDuplicate) { plan.toSkipDuplicate.push({ row, semester }); continue; }
+
+    // The PDF's own stated grade is ground truth for whether this specific
+    // attempt was capped — compare it to the natural (uncapped) grade for
+    // these marks rather than guessing from marks alone.
+    const naturalGrade = markToGrade(row.marks, false, gradingTable);
+    const needRetake = naturalGrade !== row.pdfGrade ? 1 : 0;
+
+    const pending = findPendingRetake(row.studentId, header.subjectCode);
+    const removedGradePoints = pending ? pending.totalGradePoint : 0;
+    const resolvesPriorAttempt = pending && needRetake === 0 ? true : undefined;
+
+    const record = {
+      name: row.name, studentId: row.studentId, batch: row.batch, semester,
+      subjectCode: header.subjectCode, creditHour, marks: row.marks,
+      needRetake, removedGradePoints, gradingVersion: CURRENT_GRADING_VERSION,
+      ...(resolvesPriorAttempt ? { resolvesPriorAttempt } : {}),
+    };
+    plan.toAdd.push({ row, semester, record });
+  }
+
+  return plan;
+}
+
+function renderPdfImportPreview(header, plan) {
+  const el = document.getElementById('pdf-import-preview');
+  const total = plan.toAdd.length;
+  const headerInfo = `<p class="note"><strong>${escapeHtml(header.subjectCode)} — ${escapeHtml(header.subjectName)}</strong> · ${escapeHtml(header.program)} · ${escapeHtml(header.examPeriod)} · ${escapeHtml(header.lecturer)}</p>`;
+
+  if (!total && !plan.errors.length && !plan.toSkipDuplicate.length) {
+    el.innerHTML = headerInfo + `<p class="note">No rows found in that PDF.</p>`;
+    return;
+  }
+
+  const rowsHtml = plan.toAdd.map((item, i) => `<div class="mapping-row" data-pdf-row="${i}">
+    <span style="min-width:150px">${escapeHtml(item.record.name)} (${item.record.studentId})</span>
+    <span class="credit-note">marks ${item.record.marks}, ${item.row.pdfGrade}${item.record.needRetake ? ' — capped' : ''}</span>
+    <label style="margin-left:auto;font-size:0.76rem;color:var(--muted)">Sem
+      <input type="number" class="pdf-sem-input" data-idx="${i}" value="${item.semester}" min="1" max="7" style="width:48px;padding:3px 5px;margin-left:4px">
+    </label>
+  </div>`).join('');
+
+  const dupHtml = plan.toSkipDuplicate.length
+    ? `<p class="note">${plan.toSkipDuplicate.length} row${plan.toSkipDuplicate.length === 1 ? '' : 's'} already on file with the same marks — skipped to avoid duplicating them: ${plan.toSkipDuplicate.map(d => escapeHtml(d.row.studentId)).join(', ')}.</p>`
+    : '';
+  const errorsHtml = plan.errors.length
+    ? `<p class="note" style="color:var(--warn)">${plan.errors.length} row${plan.errors.length === 1 ? '' : 's'} need attention:</p>
+       <div style="max-height:120px;overflow:auto;font-size:0.78rem;color:var(--warn);margin-bottom:10px">${plan.errors.map(escapeHtml).join('<br>')}</div>`
+    : '';
+
+  el.innerHTML = headerInfo + `
+    <p class="note">${total} result${total === 1 ? '' : 's'} ready to add. Semester is derived from batch + exam period —
+    check it, especially for anyone who's ever taken a leave of absence or repeated a semester. Nothing is saved until you confirm.</p>
+    ${rowsHtml}
+    ${dupHtml}${errorsHtml}
+    <div class="modal-actions">
+      <button class="btn primary" id="confirm-pdf-import">Import ${total} result${total === 1 ? '' : 's'}</button>
+    </div>`;
+
+  el.querySelectorAll('.pdf-sem-input').forEach(input => {
+    input.addEventListener('change', () => {
+      const idx = Number(input.dataset.idx);
+      plan.toAdd[idx].record.semester = Number(input.value) || plan.toAdd[idx].semester;
+    });
+  });
+
+  document.getElementById('confirm-pdf-import').addEventListener('click', async () => {
+    el.innerHTML = headerInfo + '<p class="note">Importing…</p>';
+    let done = 0, failed = 0;
+    for (const item of plan.toAdd) {
+      try { await Store.addRecord(item.record); done++; } catch (e) { failed++; }
+    }
+    pendingPdfPlan = null;
+    document.getElementById('pdf-file-input').value = '';
+    document.getElementById('pdf-import-modal').classList.remove('open');
+    showToast(failed ? `Imported ${done}, ${failed} failed — check your connection and try again.` : `Imported ${done} result${done === 1 ? '' : 's'} from ${header.subjectCode}.`, !!failed);
+    render();
+  });
+}
+
+async function handlePdfResultFile(file) {
+  const el = document.getElementById('pdf-import-preview');
+  el.innerHTML = '<p class="note">Reading PDF…</p>';
+  try {
+    const text = await extractTextFromPDF(file);
+    const header = parseResultSummaryPDF(text);
+    const plan = buildPdfResultsPlan(header);
+    pendingPdfPlan = plan;
+    renderPdfImportPreview(header, plan);
+  } catch (err) {
+    console.error('PDF import failed', err);
+    el.innerHTML = `<p class="note" style="color:var(--warn)">${escapeHtml(err.message || 'Could not read that PDF.')}</p>`;
+  }
 }
 
 // ---------------------------------------------------------------------------
