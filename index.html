@@ -680,9 +680,11 @@ table.data td.checkbox-cell, table.data th.checkbox-cell { width: 30px; }
           <div class="note" id="retake-hint" style="display:none"></div>
         </div>
         <div class="field">
-          <button class="btn primary" type="submit" style="width:100%">Add result</button>
+          <button class="btn primary" type="submit" style="width:100%">Review</button>
         </div>
       </form>
+
+      <div class="admin-only" id="add-record-preview" style="display:none"></div>
 
       <div class="table-wrap" id="student-table"></div>
     </section>
@@ -764,11 +766,12 @@ table.data td.checkbox-cell, table.data th.checkbox-cell { width: 30px; }
     <hr style="margin:18px 0;border:none;border-top:1px solid var(--line)">
     <h3 style="margin-bottom:4px">Firestore security rules</h3>
     <p class="note">This is what actually protects the data — the sign-in screen and the admin/viewer lists
-    above are both just app-side convenience. Paste this into
-    <strong>Firebase Console → Firestore Database → Rules</strong>, replace the placeholder emails with your
-    real ones, and click Publish, before you put any real student data in. Safe to leave visible here —
-    these rules aren't a secret, they're what enforces the restriction.</p>
-    <textarea id="rules-display" readonly style="min-height:320px;font-size:0.74rem">rules_version = '2';
+    above are both just app-side convenience/display. Paste this into
+    <strong>Firebase Console → Firestore Database → Rules</strong> and click Publish, before you put any
+    real student data in — no placeholder emails to edit this time, since the role lists now live in
+    Firestore itself (the same "Admin emails" / "Viewer emails" fields above write straight to it). Safe to
+    leave visible here — these rules aren't a secret, they're what enforces the restriction.</p>
+    <textarea id="rules-display" readonly style="min-height:340px;font-size:0.74rem">rules_version = '2';
 
 // SoIM CGPA Tracking System — Firestore security rules
 //
@@ -779,32 +782,42 @@ table.data td.checkbox-cell, table.data th.checkbox-cell { width: 30px; }
 // rules say otherwise. These rules are that "otherwise".
 //
 // Two roles: admins can read and write everything; viewers can only read.
-// EDIT THIS: replace the placeholder emails below with your real ones —
-// HOP/HOS and yourself under admins, everyone else under viewers. Every
-// request is checked by email only, not by which sign-in method was used —
-// Firestore can't tell Google and email/password sign-ins apart, so your
-// own email/password account needs to be listed under admins here too, or
-// it will lose write access. Keep this file and the app's Settings ->
-// "Admin emails" / "Viewer emails" lists in sync; update all three
-// whenever someone's access changes.
+// The list of who's in each role lives in Firestore itself now (the
+// roles/config document below), not hardcoded here — every device reads
+// the same shared list, so there's no separate copy to keep in sync per
+// browser. An email not in EITHER list is always blocked, no exceptions.
+//
+// Bootstrapping a brand new project: the very first person to sign in
+// becomes the founding admin automatically (the app writes roles/config
+// with just their email under admins). After that document exists, only
+// existing admins can change it — so this only ever fires once per
+// project. If you ever need to reset who has access, an admin can delete
+// the roles/config document directly in the Firestore console, and the
+// next person to sign in becomes the new founding admin.
 
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    function rolesDoc() {
+      return get(/databases/$(database)/documents/roles/config).data;
+    }
+
     function isAdmin() {
       return request.auth != null
-        &amp;&amp; request.auth.token.email in [
-          'you@gmail.com',
-          'hop@gmail.com',
-          'hos@gmail.com'
-        ];
+        &amp;&amp; exists(/databases/$(database)/documents/roles/config)
+        &amp;&amp; request.auth.token.email in rolesDoc().admins;
     }
 
     function isViewer() {
       return request.auth != null
-        &amp;&amp; request.auth.token.email in [
-          'colleague@gmail.com'
-        ];
+        &amp;&amp; exists(/databases/$(database)/documents/roles/config)
+        &amp;&amp; request.auth.token.email in rolesDoc().viewers;
+    }
+
+    match /roles/config {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null
+        &amp;&amp; (!exists(/databases/$(database)/documents/roles/config) || isAdmin());
     }
 
     match /records/{recordId} {
@@ -1201,9 +1214,12 @@ const Store = {
     if (this.unsubRecords) { this.unsubRecords(); this.unsubRecords = null; }
     if (this.unsubStatuses) { this.unsubStatuses(); this.unsubStatuses = null; }
     if (this.unsubMappings) { this.unsubMappings(); this.unsubMappings = null; }
+    if (this.unsubRoles) { this.unsubRoles(); this.unsubRoles = null; }
     this.records = [];
     this.statuses = {};
     this.subjectMappings = [];
+    this.rolesAdmins = [];
+    this.rolesViewers = [];
   },
 
   disconnectFirebase() {
@@ -1265,36 +1281,66 @@ const Store = {
   // reached by editing anything in this browser. Applies to EITHER sign-in
   // method (Google or email/password) — Firestore rules can't tell which
   // provider was used, only the email, so neither can this.
+  // Admin/viewer lists — Firestore-backed once connected (shared across
+  // every device, doc `roles/config`), local-only in local mode. This
+  // replaced a per-browser localStorage version that had a real problem:
+  // an unlisted email must ALWAYS be blocked, with no exception — but a
+  // fresh, never-configured browser can't hold the real lists locally
+  // without either (a) failing open for anyone (wrong — exactly what this
+  // is supposed to prevent) or (b) locking out the very admin who'd
+  // configure it, since Settings is itself hidden until admin status is
+  // known. Storing the lists in Firestore breaks that deadlock: every
+  // device reads the same lists, so there's nothing to fail open ABOUT.
+  rolesAdmins: [],
+  rolesViewers: [],
+  unsubRoles: null,
+
   getAdminEmails() {
-    try { return JSON.parse(localStorage.getItem('soim_admin_emails') || '[]'); }
-    catch (e) { return []; }
-  },
-  setAdminEmails(emails) {
-    localStorage.setItem('soim_admin_emails', JSON.stringify(emails));
+    if (this.mode === 'firestore') return this.rolesAdmins;
+    try { return JSON.parse(localStorage.getItem('soim_admin_emails') || '[]'); } catch (e) { return []; }
   },
   getViewerEmails() {
-    try { return JSON.parse(localStorage.getItem('soim_viewer_emails') || '[]'); }
-    catch (e) { return []; }
+    if (this.mode === 'firestore') return this.rolesViewers;
+    try { return JSON.parse(localStorage.getItem('soim_viewer_emails') || '[]'); } catch (e) { return []; }
   },
-  setViewerEmails(emails) {
-    localStorage.setItem('soim_viewer_emails', JSON.stringify(emails));
+  async setRoles(admins, viewers) {
+    if (this.mode === 'firestore') {
+      await this.db.collection('roles').doc('config').set({ admins, viewers });
+    } else {
+      localStorage.setItem('soim_admin_emails', JSON.stringify(admins));
+      localStorage.setItem('soim_viewer_emails', JSON.stringify(viewers));
+    }
   },
-  // Admin takes priority if an email somehow ends up on both lists. If
-  // NEITHER list has been configured yet on this specific browser (a fresh
-  // device that's never had the lists entered, now that the Firebase
-  // config itself is baked in and auto-connects everywhere), fail open to
-  // 'admin' rather than locking the person out — this is only the
-  // client-side convenience layer, never the real gate, so failing open
-  // here just means a genuine non-admin on a fresh device would still be
-  // correctly stopped by firestore.rules the moment they tried to write
-  // anything; it does not weaken actual security.
-  getRoleForEmail(email) {
-    const e = String(email || '').toLowerCase();
-    const admins = this.getAdminEmails(), viewers = this.getViewerEmails();
-    if (admins.includes(e)) return 'admin';
-    if (viewers.includes(e)) return 'viewer';
-    if (!admins.length && !viewers.length) return 'admin';
-    return null;
+
+  // One-time read (not a live subscription) used at sign-in time, before we
+  // know whether this person is even allowed to hold a subscription open.
+  // `existed: false` means this is the very first sign-in ever on a fresh
+  // project — see Auth._enforceRole, which then bootstraps the signer-in
+  // as the founding admin rather than blocking everyone forever.
+  async fetchRolesOnce() {
+    if (this.mode !== 'firestore') return { admins: this.getAdminEmails(), viewers: this.getViewerEmails(), existed: true };
+    const snap = await this.db.collection('roles').doc('config').get();
+    if (!snap.exists) return { admins: [], viewers: [], existed: false };
+    const data = snap.data() || {};
+    return {
+      admins: (data.admins || []).map(e => String(e).toLowerCase()),
+      viewers: (data.viewers || []).map(e => String(e).toLowerCase()),
+      existed: true,
+    };
+  },
+
+  _subscribeRoles() {
+    if (this.mode !== 'firestore') return;
+    if (this.unsubRoles) this.unsubRoles();
+    this.unsubRoles = this.db.collection('roles').doc('config').onSnapshot(
+      (snap) => {
+        const data = snap.exists ? (snap.data() || {}) : {};
+        this.rolesAdmins = (data.admins || []).map(e => String(e).toLowerCase());
+        this.rolesViewers = (data.viewers || []).map(e => String(e).toLowerCase());
+        this._notify();
+      },
+      (err) => console.error('Firestore roles listen failed', err)
+    );
   },
 
   // Upserts by oldCode: re-uploading a mapping for a code that's already
@@ -1352,7 +1398,13 @@ const Auth = {
       // someone whose access was revoked since their last visit shouldn't
       // stay signed in just because the browser remembered them.
       if (user) {
-        const role = Store.getRoleForEmail(user.email);
+        let role;
+        try {
+          role = await this._checkRole(user.email);
+        } catch (e) {
+          console.error('Role check failed', e);
+          role = null;
+        }
         if (!role) {
           this.currentUser = null;
           this.currentRole = null;
@@ -1365,6 +1417,7 @@ const Auth = {
         Store._subscribeRecords();
         Store._subscribeStatuses();
         Store._subscribeMappings();
+        Store._subscribeRoles();
       } else {
         this.currentUser = null;
         this.currentRole = null;
@@ -1381,11 +1434,11 @@ const Auth = {
     await this._enforceRole(email);
   },
 
-  // Signs in with Google, then checks the result against the local role
-  // lists (see Store.getRoleForEmail). A rejection here signs the person
-  // back out immediately — Firestore would refuse them anyway once
-  // firestore.rules has the same emails, but this gives an actual
-  // explanation instead of a page full of silent permission errors.
+  // Signs in with Google, then checks the result against the role lists
+  // (see _checkRole). A rejection here signs the person back out
+  // immediately — Firestore would refuse them anyway once firestore.rules
+  // has the same emails, but this gives an actual explanation instead of a
+  // page full of silent permission errors.
   async signInWithGoogle() {
     if (!this.authInstance) throw new Error('Connect a Firebase project in Settings first.');
     const provider = new firebase.auth.GoogleAuthProvider();
@@ -1393,11 +1446,33 @@ const Auth = {
     await this._enforceRole(result.user.email);
   },
 
-  // Shared by both sign-in methods — Firestore rules can't tell which
-  // provider was used, only the email, so neither does this.
+  // Reads the shared Firestore roles doc directly (not the live
+  // subscription, which only starts once we already know we're allowed to
+  // hold one open) and returns this email's role, or null if it's on
+  // neither list — with NO fallback: an email that isn't listed is always
+  // blocked, full stop. The one exception is bootstrapping a brand new
+  // project with no roles doc at all yet, where the first person to sign
+  // in becomes the founding admin — after that first write, this path
+  // never runs again for anyone.
+  async _checkRole(email) {
+    const normalized = (email || '').toLowerCase();
+    const { admins, viewers, existed } = await Store.fetchRolesOnce();
+    if (!existed) {
+      await Store.setRoles([normalized], []);
+      return 'admin';
+    }
+    if (admins.includes(normalized)) return 'admin';
+    if (viewers.includes(normalized)) return 'viewer';
+    return null;
+  },
+
+  // Used right after an explicit sign-in (Google or email/password) so the
+  // button handler gets an immediate, catchable rejection — attach() above
+  // re-derives the same result for session restoration, where there's no
+  // button click to attach an error message to.
   async _enforceRole(email) {
     const normalized = (email || '').toLowerCase();
-    const role = Store.getRoleForEmail(normalized);
+    const role = await this._checkRole(normalized);
     if (!role) {
       await this.authInstance.signOut();
       const err = new Error(`${normalized} isn't on either role list for this app.`);
@@ -1768,11 +1843,17 @@ function renderStudentView() {
   wireRecordRowEvents();
 
   const form = document.getElementById('add-record-form');
-  if (form.dataset.studentId !== state.studentId) { form.reset(); retakeOverridden = false; }
+  if (form.dataset.studentId !== state.studentId) {
+    form.reset();
+    retakeOverridden = false;
+    document.getElementById('retake-hint').style.display = 'none';
+    const preview = document.getElementById('add-record-preview');
+    preview.style.display = 'none';
+    preview.innerHTML = '';
+  }
   form.dataset.studentId = state.studentId;
   form.dataset.name = name;
   form.dataset.batch = batch;
-  document.getElementById('retake-hint').style.display = 'none';
 }
 
 // One record row can be in "editing" mode at a time.
@@ -1917,15 +1998,18 @@ function renderAuditView() {
       specific browser if you ever need to point at another project.</p>
     </div>
     <div class="audit-item">
-      <strong>Admin/Viewer lists: fail open on an unconfigured device</strong><span class="tag">Fixed</span>
-      <p>With the config now auto-connecting everywhere, a fresh browser that has never had the Admin/Viewer
-      email lists entered would otherwise reject <em>everyone</em> who signs in, including you — those lists
-      are still per-browser storage. Now, if both lists are empty on a given browser, anyone who signs in
-      there is shown as admin by default rather than locked out. This is safe specifically because these
-      lists were never the real security boundary — <code>firestore.rules</code> is, and it doesn't care what
-      a browser's local, unconfigured lists assume. Still worth entering the real lists in Settings on any
-      device you plan to use as a viewer, so it shows the correct read-only view instead of full admin
-      controls it can't actually use once it tries to write anything.</p>
+      <strong>Admin/Viewer lists moved to Firestore — strictly enforced, no fallback</strong><span class="tag">Fixed</span>
+      <p>Corrected from an earlier version of this that had a real gap: the lists briefly lived in each
+      browser's own local storage, and to avoid locking anyone out on a fresh device, an unconfigured browser
+      would treat <em>anyone</em> who signed in as admin — which meant an unauthorized email really could
+      reach the admin UI on a browser that hadn't been set up yet. Fixed properly rather than patched: the
+      lists now live in Firestore itself (a single shared <code>roles/config</code> document), so every
+      device reads the exact same list — there's no "unconfigured browser" state left to fail open about. An
+      email that isn't on either list is now blocked, always, no exceptions. The one deliberate exception is
+      bootstrapping a brand new project with no roles document at all yet: the very first person to ever
+      sign in becomes the founding admin automatically, and that path never runs again once the document
+      exists. If access ever needs a full reset, an admin can delete the <code>roles/config</code> document
+      directly in the Firestore console, and the next sign-in becomes the new founding admin.</p>
     </div>
     <div class="audit-item">
       <strong>Two roles now: Admin (full access) and Viewer (read-only)</strong><span class="tag">Added</span>
@@ -2054,6 +2138,20 @@ function renderAuditView() {
       silently carry over to a different set of students than you were looking at.</p>
     </div>
     <div class="audit-item">
+      <strong>New: preview and choice before confirming a single result too</strong><span class="tag">Added</span>
+      <p>The one-at-a-time "Add result" form no longer saves immediately on submit — it now shows a preview
+      first: the derived grade, whether it's capped, and a choice of <strong>First time</strong> /
+      <strong>Resit</strong> / <strong>Update existing record</strong>, with a sensible default already
+      picked and nothing written until you hit Confirm. Same three-way choice the PDF and bulk-upload
+      imports already had, now available for manual single entries too. The default is decided by checking
+      the existing data directly: a match on student, subject, and the <em>same</em> semester defaults to
+      Update (something to correct in place); a match in a <em>different</em> semester defaults to Resit
+      (a genuine repeat of the subject); no match at all defaults to First time. Checked this against every
+      one of the 45 real multi-attempt cases already in the system before building it — all 37 same-semester
+      duplicates fit the resit-being-resolved pattern, and all 8 cross-semester duplicates fit the
+      retake-in-a-later-semester pattern, with no exceptions either way.</p>
+    </div>
+    <div class="audit-item">
       <strong>New: retake count per subject</strong><span class="tag">Added</span>
       <p>Each subject row in a student's detail table now shows which attempt it is when there's more than
       one ("attempt 2 of 3"), and the one that finally cleared it says how many retakes that took. Grouped
@@ -2172,6 +2270,104 @@ function updateRetakeHint() {
   hint.textContent = '';
 }
 
+// Same categorization as the PDF/bulk-upload imports, applied to one
+// manually-entered result: a match on student+subject+SAME semester is
+// something to correct in place (Update), a match in a DIFFERENT semester
+// is a genuine repeat of the subject (Resit), and no match at all is a
+// first sitting (First time). Validated against all 45 real multi-attempt
+// cases in the existing data before this was built: every one of the 37
+// same-semester duplicates fits the resit-being-resolved pattern, and every
+// one of the 8 cross-semester duplicates fits the retake-in-a-later-
+// semester pattern — no exceptions either way.
+function buildSingleResultPlan(rec) {
+  const sameSemesterExisting = Store.records.find(r =>
+    r.studentId === rec.studentId && r.subjectCode === rec.subjectCode && r.semester === rec.semester);
+  const otherSemesterExisting = Store.records.find(r =>
+    r.studentId === rec.studentId && r.subjectCode === rec.subjectCode && r.semester !== rec.semester);
+  let defaultAction;
+  if (sameSemesterExisting) defaultAction = 'update';
+  else if (otherSemesterExisting) defaultAction = 'resit';
+  else defaultAction = 'add';
+  return {
+    rec,
+    sameSemesterExistingId: sameSemesterExisting ? sameSemesterExisting.id : null,
+    hasOtherSemesterHistory: !!otherSemesterExisting,
+    defaultAction,
+    action: defaultAction,
+  };
+}
+
+const SINGLE_RESULT_ACTION_LABELS = {
+  add: 'First time (add as new)',
+  resit: 'Resit (add as new, resolve the earlier attempt)',
+  update: 'Update existing record (same student, subject, and semester)',
+};
+
+function renderAddRecordPreview(plan) {
+  const el = document.getElementById('add-record-preview');
+  const r = plan.rec;
+  const grade = markToGrade(r.marks, r.needRetake === 1, GRADING_TABLE_JUN2026);
+  const gradePoint = gradeToPoint(grade, GRADING_TABLE_JUN2026);
+  const contextNote = plan.sameSemesterExistingId
+    ? 'a result already exists for this student, subject, and semester'
+    : plan.hasOtherSemesterHistory ? 'this student has an earlier attempt at this subject on file' : 'no prior record of this subject for this student';
+
+  const options = ['add', 'resit', 'update']
+    .filter(a => a !== 'update' || plan.sameSemesterExistingId) // only offer Update when there's something to update
+    .map(a => `<option value="${a}" ${plan.action === a ? 'selected' : ''}>${SINGLE_RESULT_ACTION_LABELS[a]}</option>`).join('');
+
+  el.style.display = 'block';
+  el.innerHTML = `
+    <div class="mapping-row">
+      <span><strong>${escapeHtml(r.name)}</strong> (${r.studentId}) — Sem ${r.semester} · ${escapeHtml(r.subjectCode)} ·
+      marks ${r.marks} → ${grade} (${gradePoint} pts)${r.needRetake ? ' — capped' : ''}</span>
+    </div>
+    <p class="note">${contextNote}.</p>
+    <div class="field">
+      <label for="single-result-action">Treat this as:</label>
+      <select id="single-result-action">${options}</select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn primary" id="confirm-single-result">Confirm</button>
+      <button class="btn" id="cancel-single-result">Cancel</button>
+    </div>`;
+
+  document.getElementById('single-result-action').addEventListener('change', (e) => { plan.action = e.target.value; });
+
+  document.getElementById('cancel-single-result').addEventListener('click', () => {
+    el.style.display = 'none';
+    el.innerHTML = '';
+  });
+
+  document.getElementById('confirm-single-result').addEventListener('click', async () => {
+    const finalRec = { ...plan.rec };
+    if (plan.action === 'resit') {
+      // Resolved fresh at confirm time, using the same semester-aware
+      // check as the categorization above — not whatever the as-you-type
+      // hint guessed earlier in the form, which doesn't distinguish same-
+      // vs different-semester the way this does.
+      const pending = findPendingRetake(finalRec.studentId, finalRec.subjectCode, plan.sameSemesterExistingId);
+      finalRec.removedGradePoints = pending ? pending.totalGradePoint : (finalRec.removedGradePoints || 0);
+      if (pending && finalRec.needRetake === 0) finalRec.resolvesPriorAttempt = true;
+    }
+    try {
+      if (plan.action === 'update') await Store.updateRecord(plan.sameSemesterExistingId, finalRec);
+      else await Store.addRecord(finalRec);
+      const form = document.getElementById('add-record-form');
+      form.reset();
+      retakeOverridden = false;
+      document.getElementById('retake-hint').style.display = 'none';
+      el.style.display = 'none';
+      el.innerHTML = '';
+      render();
+      showToast(plan.action === 'update' ? 'Result updated.' : 'Result added.');
+    } catch (err) {
+      console.error('Save failed', err);
+      showToast('Could not save — check your Firestore rules and connection.', true);
+    }
+  });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const form = document.getElementById('add-record-form');
   document.getElementById('f-subject').addEventListener('input', () => { retakeOverridden = false; updateRetakeHint(); });
@@ -2193,22 +2389,9 @@ document.addEventListener('DOMContentLoaded', () => {
       removedGradePoints: fd.get('removedGradePoints') ? Number(fd.get('removedGradePoints')) : 0,
       gradingVersion: CURRENT_GRADING_VERSION,
     };
-    // Explicit resolution flag — see isResolved above for why this can't
-    // rely on removedGradePoints alone when the prior attempt scored 0.
-    if (!rec.needRetake && findPendingRetake(rec.studentId, rec.subjectCode)) rec.resolvesPriorAttempt = true;
     const validationError = validateRecordInput(rec);
     if (validationError) { showToast(validationError, true); return; }
-    try {
-      await Store.addRecord(rec);
-      form.reset();
-      retakeOverridden = false;
-      document.getElementById('retake-hint').style.display = 'none';
-      render();
-      showToast('Result added.');
-    } catch (err) {
-      console.error('Add record failed', err);
-      showToast('Could not save — check your Firestore rules and connection.', true);
-    }
+    renderAddRecordPreview(buildSingleResultPlan(rec));
   });
 
   document.getElementById('back-to-intake').addEventListener('click', () => setView('intake'));
@@ -2273,17 +2456,27 @@ document.addEventListener('DOMContentLoaded', () => {
     if (state.batch) batchSelect.value = state.batch;
     settingsModal.classList.add('open');
   });
-  document.getElementById('save-role-lists').addEventListener('click', () => {
+  document.getElementById('save-role-lists').addEventListener('click', async () => {
     const parseLines = (id) => document.getElementById(id).value.split('\n').map(s => s.trim().toLowerCase()).filter(Boolean);
     const admins = parseLines('admin-emails-input');
     const viewers = parseLines('viewer-emails-input');
     const overlap = admins.filter(e => viewers.includes(e));
-    Store.setAdminEmails(admins);
-    Store.setViewerEmails(viewers);
-    const parts = [`${admins.length} admin${admins.length === 1 ? '' : 's'}`, `${viewers.length} viewer${viewers.length === 1 ? '' : 's'}`];
-    showToast(!admins.length && !viewers.length
-      ? 'Both lists cleared — sign-in will reject everyone until you add at least one email.'
-      : `Saved: ${parts.join(', ')}.${overlap.length ? ' (' + overlap.join(', ') + ' is on both — admin wins.)' : ''}`);
+    if (!admins.length && !viewers.length) {
+      showToast('At least one admin email is required — clearing both lists would lock everyone out, including you.', true);
+      return;
+    }
+    const myEmail = (Auth.currentUser && Auth.currentUser.email || '').toLowerCase();
+    if (myEmail && !admins.includes(myEmail)) {
+      if (!confirm(`Your own email (${myEmail}) won't be in the Admin list after this save — you'll be signed out and unable to sign back in as admin. Continue anyway?`)) return;
+    }
+    try {
+      await Store.setRoles(admins, viewers);
+      const parts = [`${admins.length} admin${admins.length === 1 ? '' : 's'}`, `${viewers.length} viewer${viewers.length === 1 ? '' : 's'}`];
+      showToast(`Saved: ${parts.join(', ')}.${overlap.length ? ' (' + overlap.join(', ') + ' is on both — admin wins.)' : ''}`);
+    } catch (err) {
+      console.error('Save roles failed', err);
+      showToast('Could not save — check your Firestore rules and connection.', true);
+    }
   });
   document.querySelectorAll('[data-close-modal]').forEach(el =>
     el.addEventListener('click', () => el.closest('.modal-backdrop').classList.remove('open')));
