@@ -1316,6 +1316,32 @@ const Auth = {
   },
 };
 
+// Firebase's console shows the config as a JavaScript snippet, not JSON —
+// unquoted keys, sometimes still wrapped in "const firebaseConfig = ...;",
+// sometimes with the whole import block pasted above it too. Handles all
+// of that rather than making every person reformat it by hand before
+// pasting. Uses proper brace-depth matching (not just first-{-to-last-})
+// because a real copy-paste often has an EARLIER brace pair of its own —
+// e.g. `import { initializeApp } from "firebase/app";` — before the actual
+// config object.
+function parseFirebaseConfigInput(raw) {
+  const text = raw.trim();
+  const blocks = [];
+  let depth = 0, blockStart = -1;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '{') { if (depth === 0) blockStart = i; depth++; }
+    else if (text[i] === '}') { depth--; if (depth === 0 && blockStart !== -1) { blocks.push(text.slice(blockStart, i + 1)); blockStart = -1; } }
+  }
+  let candidate = blocks.find(b => /apiKey/.test(b)) || blocks[blocks.length - 1] || text;
+  candidate = candidate.replace(/\/\/.*$/gm, ''); // strip line comments that might sit inside the block
+  candidate = candidate.replace(/'([^']*)'/g, '"$1"'); // single-quoted strings -> double-quoted
+  candidate = candidate.replace(/([{,]\s*)([A-Za-z_$][A-Za-z0-9_$]*)\s*:/g, '$1"$2":'); // bare keys -> quoted keys
+  candidate = candidate.replace(/,(\s*[}\]])/g, '$1'); // trailing commas
+  const config = JSON.parse(candidate);
+  if (!config.apiKey || !config.projectId) throw new Error('Missing apiKey or projectId — is this the full config object?');
+  return config;
+}
+
 function humanizeAuthError(err) {
   const code = err && err.code;
   if (code === 'allowlist/denied') return `${err.deniedEmail} isn't authorized for this app. Ask an admin to add it in Settings (and in firestore.rules), or sign in with a different account.`;
@@ -1742,6 +1768,29 @@ function wireRecordRowEvents() {
 function renderAuditView() {
   document.getElementById('audit-list').innerHTML = `
     <div class="audit-item">
+      <strong>Settings now accepts Firebase's config exactly as copied</strong><span class="tag">Fixed</span>
+      <p>Firebase Console shows the config as a JavaScript snippet, not JSON — unquoted keys, often still
+      wrapped in <code>const firebaseConfig = ...;</code>, sometimes with the whole import block pasted
+      above it too. All of that used to fail with a bare "could not parse as JSON." Now handled directly:
+      paste the whole thing, imports and comments included, and it still connects. Also split one error
+      message that was conflating two different problems — a config that doesn't parse now says so
+      specifically, separately from Firebase itself failing to start (e.g. the SDK not loading), which
+      previously both showed the same misleading "check the format" message.</p>
+    </div>
+    <div class="audit-item">
+      <strong>PDF import: explicit add / update / resit / skip choice per row</strong><span class="tag">Added</span>
+      <p>Each row in the PDF import preview now has its own action dropdown instead of the app silently
+      deciding: <strong>Add</strong> for a genuinely new result, <strong>Update existing record</strong> when
+      a result already exists for that exact student, subject and semester but with different marks (a
+      correction rather than a new sitting), <strong>Treat as resit</strong> when the student has this
+      subject on file from a different semester, and <strong>Skip</strong> when it's identical to what's
+      already there. The app pre-picks a sensible default from what's on file, but every row is a real
+      dropdown you can change before confirming — nothing is inferred silently. "Resit" still only resolves
+      a prior attempt when there's an actual pending (capped) one to resolve, not just because some other
+      semester has a record; retaking a subject already passed cleanly doesn't manufacture a resolution
+      that isn't there.</p>
+    </div>
+    <div class="audit-item">
       <strong>New: import results straight from the CMS "Student Result Summary" PDF</strong><span class="tag">Added</span>
       <p>The "Import PDF" button reads a CMS result-summary export directly — no manual retyping. It also
       answers the earlier open question about the retake cap: the PDF has separate Total CW and Total FE
@@ -2120,14 +2169,21 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('connect-firebase').addEventListener('click', () => {
     const raw = document.getElementById('firebase-config-input').value.trim();
     if (!raw) { showToast('Paste your Firebase config object first.', true); return; }
+    let config;
     try {
-      const config = JSON.parse(raw);
+      config = parseFirebaseConfigInput(raw);
+    } catch (e) {
+      showToast('Could not read that as a Firebase config — make sure it includes the { ... } object with apiKey, projectId, etc.', true);
+      return;
+    }
+    try {
       Store.connectFirebase(config);
       showToast('Project set. Sign in with an admin account to continue.');
       settingsModal.classList.remove('open');
       render();
     } catch (e) {
-      showToast('Could not parse that as JSON — check the format.', true);
+      console.error('Firebase init failed', e);
+      showToast('Config looked fine, but Firebase itself failed to start — check your connection and that the page fully loaded, then try again.', true);
     }
   });
 
@@ -2628,7 +2684,7 @@ let pendingPdfPlan = null;
 function buildPdfResultsPlan(header) {
   const creditHour = creditHourFromSubjectCode(header.subjectCode);
   const gradingTable = GRADING_TABLE_JUN2026; // any *new* import is "from now on" — see grading-scale versioning above
-  const plan = { toAdd: [], toSkipDuplicate: [], errors: [...header.errors] };
+  const plan = { items: [], errors: [...header.errors] };
 
   for (const row of header.rows) {
     const semester = deriveSemesterFromBatchAndPeriod(row.batch, header.examPeriod);
@@ -2640,86 +2696,135 @@ function buildPdfResultsPlan(header) {
     const validationError = validateRecordInput({ semester, subjectCode: header.subjectCode, creditHour, marks: row.marks });
     if (validationError) { plan.errors.push(`${row.studentId}: ${validationError}`); continue; }
 
-    // Duplicate-import guard: the exact same result already on file.
-    const exactDuplicate = Store.records.find(r =>
-      r.studentId === row.studentId && r.subjectCode === header.subjectCode &&
-      r.semester === semester && r.marks === row.marks);
-    if (exactDuplicate) { plan.toSkipDuplicate.push({ row, semester }); continue; }
-
     // The PDF's own stated grade is ground truth for whether this specific
     // attempt was capped — compare it to the natural (uncapped) grade for
-    // these marks rather than guessing from marks alone.
+    // these marks rather than guessing from marks alone. This is a fact
+    // about this one attempt, independent of add/update/resit below.
     const naturalGrade = markToGrade(row.marks, false, gradingTable);
     const needRetake = naturalGrade !== row.pdfGrade ? 1 : 0;
 
-    const pending = findPendingRetake(row.studentId, header.subjectCode);
-    const removedGradePoints = pending ? pending.totalGradePoint : 0;
-    const resolvesPriorAttempt = pending && needRetake === 0 ? true : undefined;
+    // What's already on file for this exact student+subject: same semester
+    // (an exact repeat of this sitting, or a correction to it) and/or an
+    // earlier semester (a genuine prior attempt this new one might resit).
+    // Recognized by matching student+subject+semester directly — not by
+    // grade, since a capped grade alone doesn't tell you whether *this*
+    // import is new data or a re-export of something already entered.
+    const sameSemesterExisting = Store.records.find(r =>
+      r.studentId === row.studentId && r.subjectCode === header.subjectCode && r.semester === semester);
+    const otherSemesterExisting = Store.records.find(r =>
+      r.studentId === row.studentId && r.subjectCode === header.subjectCode && r.semester !== semester);
 
-    const record = {
-      name: row.name, studentId: row.studentId, batch: row.batch, semester,
-      subjectCode: header.subjectCode, creditHour, marks: row.marks,
-      needRetake, removedGradePoints, gradingVersion: CURRENT_GRADING_VERSION,
-      ...(resolvesPriorAttempt ? { resolvesPriorAttempt } : {}),
-    };
-    plan.toAdd.push({ row, semester, record });
+    let defaultAction;
+    if (sameSemesterExisting && sameSemesterExisting.marks === row.marks) defaultAction = 'skip';
+    else if (sameSemesterExisting) defaultAction = 'update';
+    else if (otherSemesterExisting) defaultAction = 'resit';
+    else defaultAction = 'add';
+
+    plan.items.push({
+      row, semester, needRetake,
+      sameSemesterExistingId: sameSemesterExisting ? sameSemesterExisting.id : null,
+      hasOtherSemesterHistory: !!otherSemesterExisting,
+      action: defaultAction,
+    });
   }
 
   return plan;
 }
 
+// Builds the actual record to write for one preview item, given whatever
+// action is currently selected for it (may differ from the item's default —
+// the admin can change it in the preview before confirming).
+function buildPdfRecord(header, item) {
+  const creditHour = creditHourFromSubjectCode(header.subjectCode);
+  const base = {
+    name: item.row.name, studentId: item.row.studentId, batch: item.row.batch,
+    semester: item.semester, subjectCode: header.subjectCode, creditHour,
+    marks: item.row.marks, needRetake: item.needRetake,
+  };
+  if (item.action === 'resit') {
+    const pending = findPendingRetake(item.row.studentId, header.subjectCode, item.sameSemesterExistingId);
+    base.removedGradePoints = pending ? pending.totalGradePoint : 0;
+    if (pending && item.needRetake === 0) base.resolvesPriorAttempt = true;
+  } else {
+    base.removedGradePoints = 0;
+  }
+  return base;
+}
+
 function renderPdfImportPreview(header, plan) {
   const el = document.getElementById('pdf-import-preview');
-  const total = plan.toAdd.length;
   const headerInfo = `<p class="note"><strong>${escapeHtml(header.subjectCode)} — ${escapeHtml(header.subjectName)}</strong> · ${escapeHtml(header.program)} · ${escapeHtml(header.examPeriod)} · ${escapeHtml(header.lecturer)}</p>`;
 
-  if (!total && !plan.errors.length && !plan.toSkipDuplicate.length) {
+  if (!plan.items.length && !plan.errors.length) {
     el.innerHTML = headerInfo + `<p class="note">No rows found in that PDF.</p>`;
     return;
   }
 
-  const rowsHtml = plan.toAdd.map((item, i) => `<div class="mapping-row" data-pdf-row="${i}">
-    <span style="min-width:150px">${escapeHtml(item.record.name)} (${item.record.studentId})</span>
-    <span class="credit-note">marks ${item.record.marks}, ${item.row.pdfGrade}${item.record.needRetake ? ' — capped' : ''}</span>
-    <label style="margin-left:auto;font-size:0.76rem;color:var(--muted)">Sem
-      <input type="number" class="pdf-sem-input" data-idx="${i}" value="${item.semester}" min="1" max="7" style="width:48px;padding:3px 5px;margin-left:4px">
-    </label>
-  </div>`).join('');
+  const ACTION_LABELS = {
+    add: 'Add as new', update: 'Update existing record',
+    resit: 'Treat as resit', skip: 'Skip (already on file)',
+  };
+  const rowsHtml = plan.items.map((item, i) => {
+    const options = ['add', 'update', 'resit', 'skip']
+      .filter(a => a !== 'update' || item.sameSemesterExistingId) // only offer Update when there's something to update
+      .map(a => `<option value="${a}" ${item.action === a ? 'selected' : ''}>${ACTION_LABELS[a]}</option>`).join('');
+    const contextNote = item.sameSemesterExistingId
+      ? (item.action === 'skip' ? 'identical to what\u2019s already on file' : 'a record already exists for this student, subject and semester')
+      : item.hasOtherSemesterHistory ? 'this student has an earlier attempt at this subject on file' : '';
+    return `<div class="mapping-row" data-pdf-row="${i}">
+      <span style="min-width:150px">${escapeHtml(item.row.name)} (${item.row.studentId})</span>
+      <span class="credit-note">Sem ${item.semester} · marks ${item.row.marks}, ${item.row.pdfGrade}${item.needRetake ? ' — capped' : ''}${contextNote ? ` · ${contextNote}` : ''}</span>
+      <select class="pdf-action-select" data-idx="${i}" style="margin-left:auto;font-size:0.78rem;padding:3px 6px">${options}</select>
+      <label style="font-size:0.76rem;color:var(--muted)">Sem
+        <input type="number" class="pdf-sem-input" data-idx="${i}" value="${item.semester}" min="1" max="7" style="width:44px;padding:3px 5px;margin-left:4px">
+      </label>
+    </div>`;
+  }).join('');
 
-  const dupHtml = plan.toSkipDuplicate.length
-    ? `<p class="note">${plan.toSkipDuplicate.length} row${plan.toSkipDuplicate.length === 1 ? '' : 's'} already on file with the same marks — skipped to avoid duplicating them: ${plan.toSkipDuplicate.map(d => escapeHtml(d.row.studentId)).join(', ')}.</p>`
-    : '';
   const errorsHtml = plan.errors.length
     ? `<p class="note" style="color:var(--warn)">${plan.errors.length} row${plan.errors.length === 1 ? '' : 's'} need attention:</p>
        <div style="max-height:120px;overflow:auto;font-size:0.78rem;color:var(--warn);margin-bottom:10px">${plan.errors.map(escapeHtml).join('<br>')}</div>`
     : '';
 
+  const actionableCount = plan.items.filter(i => i.action !== 'skip').length;
   el.innerHTML = headerInfo + `
-    <p class="note">${total} result${total === 1 ? '' : 's'} ready to add. Semester is derived from batch + exam period —
-    check it, especially for anyone who's ever taken a leave of absence or repeated a semester. Nothing is saved until you confirm.</p>
+    <p class="note">${plan.items.length} result${plan.items.length === 1 ? '' : 's'} found. Each one's action is pre-picked based on
+    what's already on file — change any of them before confirming, and double-check semester for anyone who's
+    taken a leave of absence or repeated a semester. Nothing is saved until you confirm.</p>
     ${rowsHtml}
-    ${dupHtml}${errorsHtml}
+    ${errorsHtml}
     <div class="modal-actions">
-      <button class="btn primary" id="confirm-pdf-import">Import ${total} result${total === 1 ? '' : 's'}</button>
+      <button class="btn primary" id="confirm-pdf-import">Apply ${actionableCount} result${actionableCount === 1 ? '' : 's'}</button>
     </div>`;
 
   el.querySelectorAll('.pdf-sem-input').forEach(input => {
     input.addEventListener('change', () => {
-      const idx = Number(input.dataset.idx);
-      plan.toAdd[idx].record.semester = Number(input.value) || plan.toAdd[idx].semester;
+      plan.items[Number(input.dataset.idx)].semester = Number(input.value) || plan.items[Number(input.dataset.idx)].semester;
+    });
+  });
+  el.querySelectorAll('.pdf-action-select').forEach(select => {
+    select.addEventListener('change', () => {
+      plan.items[Number(select.dataset.idx)].action = select.value;
     });
   });
 
   document.getElementById('confirm-pdf-import').addEventListener('click', async () => {
-    el.innerHTML = headerInfo + '<p class="note">Importing…</p>';
+    el.innerHTML = headerInfo + '<p class="note">Applying…</p>';
     let done = 0, failed = 0;
-    for (const item of plan.toAdd) {
-      try { await Store.addRecord(item.record); done++; } catch (e) { failed++; }
+    for (const item of plan.items) {
+      if (item.action === 'skip') continue;
+      try {
+        const record = buildPdfRecord(header, item);
+        record.gradingVersion = CURRENT_GRADING_VERSION;
+        if (item.action === 'update') await Store.updateRecord(item.sameSemesterExistingId, record);
+        else await Store.addRecord(record);
+        done++;
+      } catch (e) { failed++; }
     }
     pendingPdfPlan = null;
     document.getElementById('pdf-file-input').value = '';
     document.getElementById('pdf-import-modal').classList.remove('open');
-    showToast(failed ? `Imported ${done}, ${failed} failed — check your connection and try again.` : `Imported ${done} result${done === 1 ? '' : 's'} from ${header.subjectCode}.`, !!failed);
+    showToast(failed ? `Applied ${done}, ${failed} failed — check your connection and try again.` : `Applied ${done} result${done === 1 ? '' : 's'} from ${header.subjectCode}.`, !!failed);
     render();
   });
 }
