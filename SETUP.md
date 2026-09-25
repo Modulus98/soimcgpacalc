@@ -1,5 +1,22 @@
 # Setup guide — SoIM CGPA Tracking System
 
+**Update:** as of this version, your real Firebase config is baked directly into `index.html`
+(it's not a secret — see the note in Settings), so every device and browser now auto-connects
+with no "paste your config" step. If you ever need to point this at a *different* Firebase
+project, Settings → Firebase project config still lets you override it per browser.
+
+The rest of this guide is unchanged and still applies for the one-time project setup (creating
+the project, enabling sign-in, deploying rules) — just skip step 6 ("Connect the app") on any
+device going forward, since that now happens automatically.
+
+One more thing worth knowing: the Admin/Viewer email lists in Settings (step 5) are also
+per-browser storage, same as the config used to be. To avoid a lockout on a device that's never
+had them entered, if *both* lists are empty on a given browser, anyone who successfully signs in
+is treated as admin there by default — it's not a security gap, since `firestore.rules` (step 4)
+is what actually enforces roles and doesn't care what this browser assumes. But it does mean you
+should still enter the real lists in Settings on any device you plan to use as a viewer, or that
+device will show full admin controls instead of the read-only view.
+
 The app works immediately with no setup (local mode, browser-only, seeded
 with the 736 existing result records). These steps are for turning on real
 shared storage: Firebase Firestore + sign-in restricted to specific people.
@@ -20,19 +37,23 @@ shared storage: Firebase Firestore + sign-in restricted to specific people.
 3. Google sign-in works with existing Google accounts directly — you don't pre-create users
    for it the way Email/Password needs (that one still needs Users → Add user for each account).
 
-## 4. Deploy the security rules — with your real two emails
+## 4. Deploy the security rules — with your real emails, admins and viewers
 This is the step that actually restricts access — nothing else does.
-1. Open `firestore.rules` (included alongside this file). Find `isAllowed()` near the top and
-   replace the two placeholder emails (`you@gmail.com`, `colleague@gmail.com`) with your actual
-   two Gmail addresses, exactly as they'll sign in with.
+1. Open `firestore.rules` (included alongside this file). Find `isAdmin()` and `isViewer()` near
+   the top and replace the placeholder emails with your real ones — HOP/HOS and yourself under
+   `isAdmin()`, everyone else under `isViewer()` — exactly as each person will sign in with.
 2. **Build → Firestore Database → Rules** tab → paste the edited contents in → **Publish**.
 
-## 5. Set the same two emails in the app
-1. Open the app → **Settings → "Google sign-in — allowed emails"**.
-2. Enter the *same* two addresses from step 4, one per line → **Save**.
-3. This list only runs in the browser — it's what gives someone a clear "you're not authorized"
-   message instead of a wall of confusing errors. Step 4 is what actually stops them; keep both
-   lists in sync whenever the two people change.
+## 5. Set the same emails in the app
+1. Open the app → **Settings**.
+2. Under "Admin emails," enter the same admin addresses from step 4, one per line. Under "Viewer
+   emails," enter the same viewer addresses. **Save** each.
+3. These lists only run in the browser — they're what give someone a clear "you're not
+   authorized" message, or the correct read-only view, instead of a wall of confusing errors.
+   Step 4 is what actually enforces it; keep all three (this file, and the two Settings lists) in
+   sync whenever anyone's access changes. If both lists are ever empty on a given browser (a
+   fresh device that's never had them entered), anyone who signs in there is shown as admin by
+   default — harmless, since step 4's rules are what actually decide what they can write.
 
 ## 6. Register a web app and get your config
 1. Project Overview (gear icon) → **Project settings → General**.

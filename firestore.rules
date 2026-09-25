@@ -6,28 +6,50 @@ rules_version = '2';
 // public endpoint by default — anyone who knows your project's client
 // config (which is not a secret, and is visible in your deployed page's
 // source, same as any Firebase web app) can talk to it directly unless
-// rules say otherwise. These rules are that "otherwise": every read and
-// write requires a signed-in Firebase Auth user. Deploy this file before
-// you put any real student data in — see SETUP.md, step 4.
+// rules say otherwise. These rules are that "otherwise".
 //
-// This intentionally does not check *which* user — it trusts every account
-// that exists in this Firebase project. That is safe only because you
-// create accounts yourself, one at a time, in the Firebase console (see
-// SETUP.md, step 3) rather than enabling public self-signup. If you ever
-// need to restrict further (e.g. to one specific admin email), change the
-// condition below to something like:
-//   allow read, write: if request.auth != null
-//     && request.auth.token.email in ['you@vitrox.edu.my', 'colleague@vitrox.edu.my'];
+// Two roles: admins can read and write everything; viewers can only read.
+// EDIT THIS: replace the placeholder emails below with your real ones —
+// HOP/HOS and yourself under admins, everyone else under viewers. Every
+// request is checked by email only, not by which sign-in method was used —
+// Firestore can't tell Google and email/password sign-ins apart, so your
+// own email/password account needs to be listed under admins here too, or
+// it will lose write access. Keep this file and the app's Settings ->
+// "Admin emails" / "Viewer emails" lists in sync; update all three
+// whenever someone's access changes.
 
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.email in [
+          'you@gmail.com',
+          'hop@gmail.com',
+          'hos@gmail.com'
+        ];
+    }
+
+    function isViewer() {
+      return request.auth != null
+        && request.auth.token.email in [
+          'colleague@gmail.com'
+        ];
+    }
+
     match /records/{recordId} {
-      allow read, write: if request.auth != null;
+      allow read: if isAdmin() || isViewer();
+      allow write: if isAdmin();
     }
 
     match /students/{studentId} {
-      allow read, write: if request.auth != null;
+      allow read: if isAdmin() || isViewer();
+      allow write: if isAdmin();
+    }
+
+    match /subjectMappings/{mappingId} {
+      allow read: if isAdmin() || isViewer();
+      allow write: if isAdmin();
     }
 
     // Deny everything else by default.
