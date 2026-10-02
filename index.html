@@ -188,13 +188,54 @@ body:not(.authenticated) .app-shell { display: none; }
 
 /* ---------- Intake tabs ---------- */
 
+.top-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 20px;
+  background: var(--ink);
+  overflow-x: auto;
+}
+
+.top-tab {
+  border: none;
+  background: none;
+  padding: 13px 18px;
+  font-size: 0.92rem;
+  color: rgba(255,255,255,0.65);
+  border-bottom: 3px solid transparent;
+  white-space: nowrap;
+}
+
+.top-tab.active {
+  color: #fff;
+  border-bottom-color: var(--gold);
+  font-weight: 700;
+}
+
 .intake-tabs {
   display: flex;
+  align-items: center;
   gap: 4px;
   padding: 0 20px;
   background: var(--paper-raised);
   border-bottom: 1px solid var(--line);
   overflow-x: auto;
+}
+
+.archived-toggle {
+  margin-left: auto;
+  border: none;
+  background: none;
+  padding: 12px 14px;
+  font-size: 0.78rem;
+  color: var(--muted);
+  white-space: nowrap;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.intake-tab.archived {
+  opacity: 0.68;
 }
 
 .intake-tab {
@@ -600,6 +641,7 @@ table.data td.checkbox-cell, table.data th.checkbox-cell { width: 30px; }
     </div>
   </header>
 
+  <nav class="top-tabs" id="top-tabs"></nav>
   <nav class="intake-tabs" id="intake-tabs"></nav>
 
   <main>
@@ -1006,6 +1048,15 @@ function markToGrade(marks, needRetake, gradingTable) {
 function gradeToPoint(grade, gradingTable) {
   const row = gradingTable.find(r => r.grade === grade);
   return row ? row.gradePoint : 0;
+}
+// Computes what a sitting's grade/achievement/total grade point WOULD be,
+// without needing a stored record — used when deciding whether a resit or
+// retake result should actually count, before it's been saved as one.
+function computeOutcome(marks, needRetake, creditHour, gradingTable) {
+  const grade = markToGrade(marks, needRetake, gradingTable);
+  const gradePoint = gradeToPoint(grade, gradingTable);
+  const achievement = (gradingTable.find(g => g.grade === grade) || {}).achievement || null;
+  return { grade, gradePoint, achievement, totalGradePoint: round2(gradePoint * creditHour) };
 }
 function creditHourFromSubjectCode(subjectCode) {
   const n = Number(String(subjectCode).trim().slice(-1));
@@ -1640,9 +1691,28 @@ function findPendingRetake(studentId, subjectCode, excludeId = null) {
 // keep the order they were entered in, since nothing finer-grained than
 // that is tracked.
 function getSubjectAttempts(studentId, subjectCode) {
+  // A real bug lived here: sorting only by semester leaves same-semester
+  // attempts (a resit) in whatever arbitrary order they happen to sit in
+  // storage — which for Firestore is not guaranteed to be insertion order
+  // at all. Confirmed directly against a real case where this put the
+  // RESOLVING attempt before the one it resolves, mislabeling "attempt 2
+  // of 3" as the clean pass and "attempt 3 of 3" as if it were still
+  // pending — backwards from what actually happened, and why that pending
+  // subject was correctly absent from "Subjects pending retake" (the
+  // underlying resolution logic isn't order-dependent) while still
+  // displaying as if it were still outstanding.
+  // Fixed with a same-semester tiebreaker: an attempt that resolves
+  // another (removedGradePoints set, or resolvesPriorAttempt flagged)
+  // is, by definition, the later of the two — sort it after.
+  const isResolving = (r) => (r.removedGradePoints && r.removedGradePoints !== 0) || r.resolvesPriorAttempt === true;
   return getStudentRecords(studentId)
     .filter(r => r.subjectCode === subjectCode)
-    .sort((a, b) => a.semester - b.semester);
+    .sort((a, b) => {
+      if (a.semester !== b.semester) return a.semester - b.semester;
+      const aResolving = isResolving(a), bResolving = isResolving(b);
+      if (aResolving !== bResolving) return aResolving ? 1 : -1;
+      return 0;
+    });
 }
 
 function getAttemptInfo(studentId, record) {
@@ -1672,6 +1742,7 @@ function render() {
   renderUndoButton();
   autoPromoteGraduates();
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  renderTopTabs();
   renderIntakeTabs();
   renderConnectionPill();
 
@@ -1702,15 +1773,58 @@ function renderConnectionPill() {
   }
 }
 
+// A batch with at least one student, where every single one is Graduated
+// or Withdrawn (none still Active), is done — nothing left to track day to
+// day. Archived by default so the sub-tab row doesn't just keep growing as
+// batch after batch finishes over the years; still reachable via the
+// "Show archived" toggle, never deleted or hidden from exports/search.
+function isBatchArchived(batch) {
+  const students = getStudentsInBatch(batch);
+  if (!students.length) return false;
+  return students.every(s => s.status === 'graduated' || s.status === 'withdrawn');
+}
+
+let showArchivedBatches = false; // resets each page load — a view toggle, not a saved preference
+
+function renderTopTabs() {
+  const wrap = document.getElementById('top-tabs');
+  const section = state.view === 'audit' ? 'audit' : 'cgpa';
+  wrap.innerHTML = `
+    <button class="top-tab${section === 'cgpa' ? ' active' : ''}" data-section="cgpa">CGPA</button>
+    <button class="top-tab${section === 'audit' ? ' active' : ''}" data-section="audit">Data Audit</button>`;
+  wrap.querySelector('[data-section="cgpa"]').addEventListener('click', () => {
+    if (section !== 'cgpa') setView('intake', { batch: state.batch });
+  });
+  wrap.querySelector('[data-section="audit"]').addEventListener('click', () => setView('audit'));
+}
+
 function renderIntakeTabs() {
-  const batches = getBatches();
-  if (!state.batch || !batches.includes(state.batch)) state.batch = batches[0];
   const wrap = document.getElementById('intake-tabs');
-  wrap.innerHTML = batches.map(b => {
+  const section = state.view === 'audit' ? 'audit' : 'cgpa';
+  if (section !== 'cgpa') { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+  wrap.style.display = 'flex';
+
+  const allBatches = getBatches();
+  if (!state.batch || !allBatches.includes(state.batch)) {
+    const firstActive = allBatches.find(b => !isBatchArchived(b));
+    state.batch = firstActive || allBatches[0];
+  }
+  const archived = allBatches.filter(isBatchArchived);
+  const active = allBatches.filter(b => !isBatchArchived(b));
+  // Keep the current batch visible even if it's archived and the toggle is
+  // off — otherwise its own tab would vanish out from under whoever's
+  // looking at it.
+  const visibleBatches = showArchivedBatches ? allBatches
+    : (isBatchArchived(state.batch) && !active.includes(state.batch) ? [...active, state.batch] : active);
+
+  wrap.innerHTML = visibleBatches.map(b => {
     const n = getStudentsInBatch(b).length;
-    const active = b === state.batch && state.view !== 'audit' ? ' active' : '';
-    return `<button class="intake-tab${active}" data-batch="${b}">${b} <span class="count">(${n})</span></button>`;
-  }).join('') + `<button class="intake-tab${state.view === 'audit' ? ' active' : ''}" data-audit="1">Data Audit</button>`;
+    const activeClass = b === state.batch ? ' active' : '';
+    return `<button class="intake-tab${activeClass}${isBatchArchived(b) ? ' archived' : ''}" data-batch="${b}">${b} <span class="count">(${n})</span></button>`;
+  }).join('');
+  if (archived.length) {
+    wrap.innerHTML += `<button class="archived-toggle" data-toggle-archived="1">${showArchivedBatches ? 'Hide' : 'Show'} archived (${archived.length})</button>`;
+  }
 
   wrap.querySelectorAll('[data-batch]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1718,7 +1832,8 @@ function renderIntakeTabs() {
       setView('intake', { batch: btn.dataset.batch });
     });
   });
-  wrap.querySelector('[data-audit]').addEventListener('click', () => setView('audit'));
+  const toggleBtn = wrap.querySelector('[data-toggle-archived]');
+  if (toggleBtn) toggleBtn.addEventListener('click', () => { showArchivedBatches = !showArchivedBatches; render(); });
 }
 
 // ---------------------------------------------------------------------------
@@ -1964,18 +2079,30 @@ function renderRecordRow(r) {
     </td></tr>` : ''}`;
   }
   const attemptInfo = getAttemptInfo(r.studentId, r);
-  // Resit has no count shown at all (every real same-semester case so far
-  // has been exactly one resit, so a number would just always read "1" —
-  // see the validation note on getAttemptInfo above); retake keeps the
-  // count, since a subject really can be retaken more than once, but the
-  // word itself stays singular either way.
-  const passedAfterText = attemptInfo.isResit
-    ? ' — passed after resit'
-    : ' — passed after ' + (attemptInfo.totalAttempts - 1) + ' retake';
+  // "Resolved" (needRetake cleared) and "achieved a passing grade" are two
+  // different things here — a resit capped at C- clears the retake
+  // requirement while still landing in the Fail achievement band. Report
+  // both honestly rather than calling a Fail result "passed": the word
+  // reflects this specific attempt's own achievement, not just whether
+  // it's resolved. Resit has no count shown at all (every real
+  // same-semester case so far has been exactly one resit, so a number
+  // would just always read "1" — see the validation note on getAttemptInfo
+  // above); retake keeps the count, since a subject really can be retaken
+  // more than once, but the word itself stays singular either way.
+  const didFail = r.achievement === 'Fail';
+  const outcomeWord = didFail ? 'failed' : 'passed';
+  const keptNote = r.keptHigherPriorGrade ? ' — kept the higher grade from the earlier attempt' : '';
+  const afterText = attemptInfo.isResit
+    ? ` — ${outcomeWord} after resit${keptNote}`
+    : ` — ${outcomeWord} after ${attemptInfo.totalAttempts - 1} retake${keptNote}`;
   const isSevere = attemptInfo.failedCount > 3; // flagged regardless of whether it's since been resolved — a student who needed 4+ sittings to clear (or still hasn't) is worth surfacing either way
+  // Red is reserved for the chronic (4+ failed attempts) flag specifically
+  // — a Fail-achievement resit resolution on its own is a routine, expected
+  // outcome under the C- cap policy, not something that needs the same
+  // visual alarm as a student who's needed repeated sittings.
   const attemptNoteStyle = isSevere ? 'color:var(--warn);font-weight:600' : 'color:var(--muted)';
   const attemptNote = attemptInfo.totalAttempts > 1
-    ? `<br><span style="${attemptNoteStyle};font-size:0.72rem">attempt ${attemptInfo.attemptNumber} of ${attemptInfo.totalAttempts}${attemptInfo.attemptNumber === attemptInfo.totalAttempts && !isRetake ? passedAfterText : ''}${isSevere ? ' ⚠' : ''}</span>`
+    ? `<br><span style="${attemptNoteStyle};font-size:0.72rem">attempt ${attemptInfo.attemptNumber} of ${attemptInfo.totalAttempts}${attemptInfo.attemptNumber === attemptInfo.totalAttempts && !isRetake ? afterText : ''}${isSevere ? ' ⚠' : ''}</span>`
     : '';
   return `<tr>
     <td>Sem ${r.semester}</td>
@@ -2261,6 +2388,66 @@ function renderAuditView() {
       them at once — no need to open each student's page individually anymore, though that still works too
       for one at a time. Selection clears when you switch intake or change the status filter, so it can't
       silently carry over to a different set of students than you were looking at.</p>
+    </div>
+    <div class="audit-item">
+      <strong>Fixed a real bug: same-semester attempts could display out of order</strong><span class="tag">Fixed</span>
+      <p>Spotted directly from a real case: a subject showed "attempt 2 of 3" as a clean Pass and "attempt 3
+      of 3" as if still pending a retake — backwards from what actually happened. Confirmed by checking the
+      numbers: attempt 2's Removed Grade Points matched attempt 3's own total exactly, meaning attempt 2 was
+      actually resolving attempt 3, not the other way around. Root cause: attempts were sorted by semester
+      only, with no tiebreaker for two attempts sharing the same semester (a resit) — leaving them in
+      whatever order they happened to sit in storage, which for Firestore isn't guaranteed to match when they
+      were actually entered. The underlying pending/resolved calculation was never affected by this (that's
+      computed independently of display order, which is why the subject correctly stayed off "Subjects
+      pending retake" even while displaying as if it hadn't been resolved) — this was purely a confusing
+      display ordering, not a CGPA calculation error. Fixed with a same-semester tiebreaker: whichever attempt
+      actually resolves another now always sorts after it. Checked the exact reported case (now shows attempt
+      2 as the still-failing 48-mark sitting and attempt 3 as the resolving 50-mark pass, matching reality),
+      and re-ran the full 45-case real-data validation from earlier — still zero mismatches.</p>
+    </div>
+    <div class="audit-item">
+      <strong>Bulk Excel upload: the "keep the higher grade" rule now applies there too</strong><span class="tag">Fixed</span>
+      <p>The bulk upload template already auto-filled Removed Grade Points when left blank for a new row
+      resolving a pending attempt — that part worked correctly before this. What it was missing: the "keep the
+      higher grade" rule added for the single-result form and PDF import didn't carry over here, so a
+      bulk-uploaded resit that scored worse than the original attempt (both still failing) would have
+      cancelled out the original's higher points instead of keeping them. Fixed to match — same rule, same
+      three outcomes, now identical across all three ways a resit can be entered. Confirmed directly: entering
+      a worse resit via bulk upload now keeps the original's points counting toward CGPA, the same as it
+      already did through the single-result form and PDF import; a better resit still counts its own higher
+      points; an explicit Removed Grade Points value typed into the sheet is still respected over either.</p>
+    </div>
+    <div class="audit-item">
+      <strong>"Passed"/"failed" after resit or retake now reflects the actual grade, and a worse resit no longer counts against the student</strong><span class="tag">Changed</span>
+      <p>Raised directly from a real example: a resit capped at C- showed "passed after resit" while its own
+      achievement band was "Fail" — both were individually correct (C- does clear the retake requirement
+      under the cap policy, and C- is genuinely below the Pass threshold) but saying "passed" on a Fail result
+      read as a contradiction. The attempt note now says <strong>passed</strong> or <strong>failed</strong>
+      based on that attempt's own achievement band, not just whether the retake requirement was cleared.<br><br>
+      Added alongside it, by request: when a resit or retake still comes back Fail, the system now compares it
+      against the original attempt it's resolving — if the new sitting actually scored lower than the
+      original (both failing, just by different amounts), the original's higher grade is kept counting
+      toward CGPA instead of the worse new one, so a student isn't penalized for a second sitting that went
+      worse than the first. Only applies when the new sitting itself fails; a resit or retake that passes
+      always counts on its own merits, same as before. When this happens, the row shows "kept the higher
+      grade from the earlier attempt" so it's clear why the Removed Grade Points figure doesn't match the
+      new sitting's own total. Tested directly: a resit scoring worse while still failing correctly keeps the
+      original's points; a resit scoring better (even while still technically Fail) correctly counts its own,
+      higher points instead; a resit that passes is unaffected either way.</p>
+    </div>
+    <div class="audit-item">
+      <strong>Two-level navigation: CGPA / Data Audit up top, batches nested underneath</strong><span class="tag">Changed</span>
+      <p>The batch tabs and "Data Audit" used to sit in one flat row. Now there's a top-level CGPA / Data
+      Audit switcher, with the batch tabs as a second row underneath — visible under CGPA, hidden under Data
+      Audit — leaving room for other top-level sections later without the top row turning into the thing
+      that needed cleaning up. Also added: a batch where every single student is Graduated or Withdrawn (none
+      still Active) is archived out of the default row automatically, with a "Show archived (N)" toggle to
+      bring them back — otherwise the row would just keep growing every year as batches finish. A batch with
+      even one Active student stays in the normal row untouched. Archiving only changes what's shown by
+      default; an archived batch's data, exports, and student pages all still work exactly the same once
+      you've revealed or opened it — confirmed directly, including that navigating straight into an archived
+      batch keeps its own tab visible even with the toggle off, so switching to it never makes its tab vanish
+      out from under you.</p>
     </div>
     <div class="audit-item">
       <strong>Fixed a real bug: resolved prior attempts were still defaulting to Resit</strong><span class="tag">Fixed</span>
@@ -2628,8 +2815,23 @@ function renderAddRecordPreview(plan) {
       // pending one this needs to find (a same-semester resit) — excluding
       // it would hide the case that most needs catching.
       const pending = findPendingRetake(finalRec.studentId, finalRec.subjectCode);
-      finalRec.removedGradePoints = pending ? pending.totalGradePoint : (finalRec.removedGradePoints || 0);
-      if (pending && finalRec.needRetake === 0) finalRec.resolvesPriorAttempt = true;
+      if (pending) {
+        // See the identical comment and logic on buildPdfResultsPlan's
+        // resit branch: a resit that still fails but scores worse than the
+        // original keeps the original's higher grade counting, rather than
+        // penalizing a worse second sitting. Only when the resit itself
+        // fails — a passing resit always counts on its own merits.
+        const newOutcome = computeOutcome(finalRec.marks, finalRec.needRetake, finalRec.creditHour, GRADING_TABLE_JUN2026);
+        if (newOutcome.achievement === 'Fail' && newOutcome.totalGradePoint < pending.totalGradePoint) {
+          finalRec.removedGradePoints = newOutcome.totalGradePoint;
+          finalRec.keptHigherPriorGrade = true;
+        } else {
+          finalRec.removedGradePoints = pending.totalGradePoint;
+        }
+        if (finalRec.needRetake === 0) finalRec.resolvesPriorAttempt = true;
+      } else {
+        finalRec.removedGradePoints = finalRec.removedGradePoints || 0;
+      }
     }
     try {
       if (plan.action === 'update') {
@@ -3181,7 +3383,25 @@ function buildResultsPlan(rawRows) {
           record.needRetake = gradeToPoint(naturalGrade, GRADING_TABLE_JUN2026) < 2.0 ? 1 : 0;
         }
       }
-      if (record.removedGradePoints === undefined) record.removedGradePoints = pending ? pending.totalGradePoint : 0;
+      if (record.removedGradePoints === undefined) {
+        if (pending) {
+          // Same "keep the higher grade" rule as the single-result form and
+          // PDF import: if this new sitting still fails, and scores worse
+          // than the pending attempt it's resolving, keep the original's
+          // higher points counting instead of cancelling them out for a
+          // worse one. Only when the new sitting itself fails — a pass
+          // always counts on its own merits.
+          const newOutcome = computeOutcome(record.marks, record.needRetake, record.creditHour, GRADING_TABLE_JUN2026);
+          if (newOutcome.achievement === 'Fail' && newOutcome.totalGradePoint < pending.totalGradePoint) {
+            record.removedGradePoints = newOutcome.totalGradePoint;
+            record.keptHigherPriorGrade = true;
+          } else {
+            record.removedGradePoints = pending.totalGradePoint;
+          }
+        } else {
+          record.removedGradePoints = 0;
+        }
+      }
       if (pending && record.needRetake === 0) record.resolvesPriorAttempt = true;
     }
 
@@ -3494,8 +3714,25 @@ function buildPdfRecord(header, item) {
     // record this needs to find and resolve (a same-semester resit), so
     // excluding it would hide the one case this most needs to catch.
     const pending = findPendingRetake(item.row.studentId, header.subjectCode);
-    base.removedGradePoints = pending ? pending.totalGradePoint : 0;
-    if (pending && item.needRetake === 0) base.resolvesPriorAttempt = true;
+    if (pending) {
+      // A resit clears the retake requirement even when it's still a Fail
+      // achievement (capped at C-) — but if the student actually scores
+      // WORSE on the resit than their original attempt while still Fail
+      // either way, keep the higher (original) grade counting instead of
+      // penalizing a worse second sitting. Only applies when the resit
+      // itself fails; a resit that passes always counts on its own merits,
+      // same as before.
+      const newOutcome = computeOutcome(base.marks, base.needRetake, creditHour, GRADING_TABLE_JUN2026);
+      if (newOutcome.achievement === 'Fail' && newOutcome.totalGradePoint < pending.totalGradePoint) {
+        base.removedGradePoints = newOutcome.totalGradePoint;
+        base.keptHigherPriorGrade = true;
+      } else {
+        base.removedGradePoints = pending.totalGradePoint;
+      }
+      if (item.needRetake === 0) base.resolvesPriorAttempt = true;
+    } else {
+      base.removedGradePoints = 0;
+    }
   } else {
     base.removedGradePoints = 0;
   }
