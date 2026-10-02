@@ -2138,6 +2138,18 @@ function renderAuditView() {
       silently carry over to a different set of students than you were looking at.</p>
     </div>
     <div class="audit-item">
+      <strong>Fixed: PDF import choked on an asterisk-marked grade (e.g. "*C")</strong><span class="tag">Fixed</span>
+      <p>The CMS marks a grade with a leading <code>*</code> to show that specific result came from a resit —
+      the parser didn't expect that character at all and rejected the whole row. Now parsed correctly: the
+      asterisk is stripped before the grade is used for anything (display, grade-point lookup, comparisons),
+      and its presence is treated as direct confirmation from the CMS that the row is a resit — trusted even
+      in the rare case where this system has no matching prior record of its own (e.g. the original failing
+      attempt predates this system), defaulting that row to Resit instead of Add. The grade still shows with
+      its asterisk in the preview (e.g. "*C"), and a row like this gets the same flagged-in-amber treatment as
+      a locally-detected pending resit, with a note explaining there's no local record backing it up — worth
+      a manual check.</p>
+    </div>
+    <div class="audit-item">
       <strong>PDF preview: flags pending resits, confirmed re-upload safety</strong><span class="tag">Added</span>
       <p>Checked the re-upload case directly: importing the exact same PDF twice already defaulted every row
       to Skip the second time around — confirmed working, no change needed there. New on top of that: any row
@@ -2963,13 +2975,15 @@ function parseResultSummaryPDF(rawText) {
     // Not anchored to end-of-chunk: the chunk also has the *next* row's
     // leading row-number stuck on the end (e.g. "...3.00 1 2" right before
     // the next Student Number), so anchoring to $ would swallow that "2"
-    // and fail to match at all.
-    const tailMatch = chunk.match(/(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+)\s+([A-F][+-]?)\s+(\d+\.\d+)\s+(\d+)/);
+    // and fail to match at all. The grade itself can carry a leading "*"
+    // (e.g. "*C") — the CMS's own marker that this specific result is a
+    // resit, captured separately and stripped before use as a plain grade.
+    const tailMatch = chunk.match(/(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+)\s+(\*)?([A-F][+-]?)\s+(\d+\.\d+)\s+(\d+)/);
     if (!tailMatch) {
       errors.push(`Could not read the result fields for ${studentId} — raw text: "${chunk}"`);
       continue;
     }
-    const [, totalCW, totalFE, totalMarks, grade, gradePoint, attempt] = tailMatch;
+    const [, totalCW, totalFE, totalMarks, resitMark, grade, gradePoint, attempt] = tailMatch;
     let namePart = chunk.slice(0, tailMatch.index).trim();
 
     let examStatus = '';
@@ -2990,6 +3004,7 @@ function parseResultSummaryPDF(rawText) {
       pdfGrade: grade,
       pdfGradePoint: Number(gradePoint),
       attempt: Number(attempt),
+      cmsResitMarker: !!resitMark,
     });
   }
 
@@ -3059,7 +3074,11 @@ function buildPdfResultsPlan(header) {
     let defaultAction;
     if (sameSemesterExisting && sameSemesterExisting.marks === row.marks) defaultAction = 'skip';
     else if (sameSemesterExisting) defaultAction = 'update';
-    else if (otherSemesterExisting) defaultAction = 'resit';
+    // The CMS's own "*" marker on the grade is direct confirmation this
+    // sitting is a resit, even in the edge case where this system has no
+    // prior record of it (e.g. the original failing attempt predates this
+    // system) — trusted the same as finding actual prior history ourselves.
+    else if (otherSemesterExisting || row.cmsResitMarker) defaultAction = 'resit';
     else defaultAction = 'add';
 
     plan.items.push({
@@ -3067,6 +3086,7 @@ function buildPdfResultsPlan(header) {
       sameSemesterExistingId: sameSemesterExisting ? sameSemesterExisting.id : null,
       hasOtherSemesterHistory: !!otherSemesterExisting,
       pendingPrior: pendingPrior ? { marks: pendingPrior.marks, grade: pendingPrior.grade, semester: pendingPrior.semester } : null,
+      cmsResitMarker: row.cmsResitMarker,
       action: defaultAction,
     });
   }
@@ -3115,11 +3135,14 @@ function renderPdfImportPreview(header, plan) {
       ? (item.action === 'skip' ? 'identical to what\u2019s already on file' : 'a record already exists for this student, subject and semester')
       : item.pendingPrior
         ? `⚠ prior attempt Sem ${item.pendingPrior.semester}: ${item.pendingPrior.marks} marks (${item.pendingPrior.grade}) — still pending, this will resolve it`
-        : item.hasOtherSemesterHistory ? 'earlier attempt on file, already resolved — not a pending resit' : '';
-    const alertStyle = item.pendingPrior ? ' style="color:var(--warn);font-weight:600"' : '';
+        : item.cmsResitMarker
+          ? '⚠ marked as a resit by the CMS (*), but no matching prior record found in this system — worth checking manually'
+          : item.hasOtherSemesterHistory ? 'earlier attempt on file, already resolved — not a pending resit' : '';
+    const alertStyle = (item.pendingPrior || item.cmsResitMarker) ? ' style="color:var(--warn);font-weight:600"' : '';
+    const gradeDisplay = item.cmsResitMarker ? `*${item.row.pdfGrade}` : item.row.pdfGrade;
     return `<div class="mapping-row" data-pdf-row="${i}">
       <span style="min-width:150px">${escapeHtml(item.row.name)} (${item.row.studentId})</span>
-      <span class="credit-note">Sem ${item.semester} · marks ${item.row.marks}, ${item.row.pdfGrade}${item.needRetake ? ' — capped' : ''}${contextNote ? `<br><span${alertStyle}>${contextNote}</span>` : ''}</span>
+      <span class="credit-note">Sem ${item.semester} · marks ${item.row.marks}, ${gradeDisplay}${item.needRetake ? ' — capped' : ''}${contextNote ? `<br><span${alertStyle}>${contextNote}</span>` : ''}</span>
       <select class="pdf-action-select" data-idx="${i}" style="margin-left:auto;font-size:0.78rem;padding:3px 6px">${options}</select>
       <label style="font-size:0.76rem;color:var(--muted)">Sem
         <input type="number" class="pdf-sem-input" data-idx="${i}" value="${item.semester}" min="1" max="7" style="width:44px;padding:3px 5px;margin-left:4px">
@@ -3133,9 +3156,9 @@ function renderPdfImportPreview(header, plan) {
     : '';
 
   const actionableCount = plan.items.filter(i => i.action !== 'skip').length;
-  const pendingCount = plan.items.filter(i => i.pendingPrior).length;
-  const pendingSummary = pendingCount
-    ? ` <strong style="color:var(--warn)">${pendingCount} of them ${pendingCount === 1 ? 'has' : 'have'} a pending resit from an earlier semester</strong> — flagged below.`
+  const flaggedCount = plan.items.filter(i => i.pendingPrior || i.cmsResitMarker).length;
+  const pendingSummary = flaggedCount
+    ? ` <strong style="color:var(--warn)">${flaggedCount} of them ${flaggedCount === 1 ? 'is' : 'are'} flagged as a resit</strong> — see below.`
     : '';
   el.innerHTML = headerInfo + `
     <p class="note">${plan.items.length} result${plan.items.length === 1 ? '' : 's'} found.${pendingSummary} Each one's action is pre-picked based on
