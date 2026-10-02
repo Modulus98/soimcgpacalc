@@ -1170,7 +1170,22 @@ function computeStudentSummary(records, config = ENGINE_CONFIG) {
 
   const totalCumGradePoint = round2(sum(gpaScope, 'totalGradePoint'));
   const totalCumGradePointExclRepeat = round2(sum(gpaScope.filter(countsTowardFinal), 'totalGradePoint'));
-  const totalCumCt = sum(gpaScope, 'creditHour') - sum(records.filter(isResolved), 'creditHour');
+  // A real bug lived here: for every OTHER attempt at the same subject that
+  // a resolving record cancels out, not just one — raised directly, with a
+  // real 3-attempt case (fail, fail again, finally clear). The credit
+  // hours of ALL the attempts it supersedes need deducting, not just its
+  // own, or a subject attempted 3 times before clearing counts 3 credit
+  // hours' worth in the denominator instead of 1. Confirmed this was a
+  // pure no-op for every existing real case before changing it — all 45
+  // historical multi-attempt subjects are exactly 2 attempts each, where
+  // deducting "the other one" and deducting "the resolving row's own"
+  // happen to be the same number; it only changes the result for 3-or-more
+  // attempts, which didn't exist anywhere in the historical data.
+  let resolvedDeduction = 0;
+  for (const r of records.filter(isResolved)) {
+    resolvedDeduction += sum(records.filter(x => x.subjectCode === r.subjectCode && x.id !== r.id), 'creditHour');
+  }
+  const totalCumCt = sum(gpaScope, 'creditHour') - resolvedDeduction;
   const totalCumCtExclRepeat = sum(gpaScope.filter(countsTowardFinal), 'creditHour');
   const totalCumCtInclMPU = sum(records.filter(countsTowardFinal), 'creditHour');
 
@@ -2510,6 +2525,20 @@ function renderAuditView() {
       them at once — no need to open each student's page individually anymore, though that still works too
       for one at a time. Selection clears when you switch intake or change the status filter, so it can't
       silently carry over to a different set of students than you were looking at.</p>
+    </div>
+    <div class="audit-item">
+      <strong>Fixed a real bug: a subject attempted 3+ times could over-count credit hours in CGPA Temporary</strong><span class="tag">Fixed</span>
+      <p>Raised directly, with the exact numbers worked through by hand: a subject resolved after 3 total
+      sittings (fail, fail again, finally clear) was only having ONE attempt's credit hours deducted from the
+      CGPA Temporary denominator, not the other two it superseded — counting that one subject's credit hours
+      three times over instead of once. The fix now deducts every other attempt at the same subject a
+      resolving record cancels out, not just its own. Checked first whether this could affect any existing
+      data: all 45 real historical multi-attempt subjects are exactly 2 attempts each, where "deduct the
+      other one" and "deduct the resolving row's own" happen to be the same number — so this was a pure no-op
+      for every historical case, confirmed directly, and only changes the result for 3-or-more attempts.
+      Re-verified the exact reported numbers afterward: credit-hour denominator 24 (not 27), CGPA Temporary
+      2.07 — matching exactly. CGPA Final uses an entirely different formula and was correctly unaffected,
+      unchanged at 2.48 throughout.</p>
     </div>
     <div class="audit-item">
       <strong>Fixed a real bug: PDF import could skip a semester for a student behind their batch</strong><span class="tag">Fixed</span>
