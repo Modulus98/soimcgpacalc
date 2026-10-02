@@ -1591,6 +1591,29 @@ function getStudentRecords(studentId) {
   return getDerivedRecords().filter(r => r.studentId === studentId);
 }
 
+// Approximates a batch's curriculum as the union of every distinct
+// (resolved) subject code anyone in that batch has ever been recorded
+// against — there's no separate, authoritative subject-list data source,
+// so this treats "a subject at least one other student in the same batch
+// has sat" as evidence it belongs to the curriculum. Reasonable for a
+// structured diploma cohort where everyone follows the same subject list,
+// but it only knows about a subject once someone has actually sat it — a
+// subject nobody in the batch has reached yet won't show up here either.
+function getBatchCurriculum(batch) {
+  const codes = new Set();
+  for (const r of getDerivedRecords()) if (r.batch === batch) codes.add(r.subjectCode);
+  return [...codes].sort();
+}
+
+// Subjects in the batch's curriculum this student has no record of at all
+// yet — distinct from "pending retake" (a subject they've sat and failed/
+// capped, still awaiting resolution). This is "hasn't sat it at all."
+function getSubjectsYetToTake(studentId, batch) {
+  const curriculum = getBatchCurriculum(batch);
+  const attempted = new Set(getStudentRecords(studentId).map(r => r.subjectCode));
+  return curriculum.filter(code => !attempted.has(code));
+}
+
 // Finds a not-yet-resolved retake for this student+subject, if any. Used to
 // auto-suggest the retake checkbox and removed-grade-points value when
 // entering a new result — see the note above updateRetakeHint for why this
@@ -1768,13 +1791,14 @@ function renderIntakeView() {
       <th>Total Cum Ct (incl. MPU)</th>
       ${semCols.map(n => `<th>GPA Sem ${n}</th>`).join('')}
       <th class="highlight">CGPA Temp.</th><th>CGPA Final</th>
-      <th>Eligibility</th><th>Repeats needed</th><th>Pending subjects</th>
+      <th>Eligibility</th><th>Repeats needed</th><th>Pending subjects</th><th>Yet to be taken</th>
     </tr>`;
 
   const tbody = rows.map(r => {
     const s = r.summary;
     const pill = s.eligibility === 'Eligible'
       ? `<span class="pill good">Eligible</span>` : `<span class="pill warn">Not Eligible</span>`;
+    const yetToTake = getSubjectsYetToTake(r.studentId, state.batch);
     return `<tr class="clickable" data-student="${r.studentId}">
       ${isAdmin() ? `<td class="checkbox-cell" data-no-nav="1"><input type="checkbox" class="row-select" data-student="${r.studentId}" ${selectedStudentIds.has(r.studentId) ? 'checked' : ''}></td>` : ''}
       <td class="name-cell"><button>${escapeHtml(r.name)}</button></td>
@@ -1787,6 +1811,7 @@ function renderIntakeView() {
       <td class="highlight">${s.cgpaTemporary ?? '–'}</td><td>${s.cgpaFinal ?? '–'}</td>
       <td>${pill}</td><td>${s.repeatCount}</td>
       <td>${s.repeatCount ? escapeHtml(s.pendingRetakeSubjects.join(', ')) : '–'}</td>
+      <td>${yetToTake.length ? escapeHtml(yetToTake.join(', ')) : '–'}</td>
     </tr>`;
   }).join('');
 
@@ -1867,12 +1892,15 @@ function renderStudentView() {
       return attempts.length > 1 && !attempts.every(a => a.semester === attempts[0].semester);
     });
 
+  const yetToTake = getSubjectsYetToTake(state.studentId, batch);
+
   document.getElementById('student-stats').innerHTML = `
     <div class="stat-card"><div class="label">CGPA (Final)</div><div class="value">${s.cgpaFinal ?? '–'}</div></div>
     <div class="stat-card"><div class="label">CGPA (Temporary)</div><div class="value">${s.cgpaTemporary ?? '–'}</div></div>
     <div class="stat-card"><div class="label">Eligibility</div><div class="value">${s.eligibility}</div></div>
     <div class="stat-card"><div class="label">Subjects pending retake</div><div class="value">${s.repeatCount}${s.repeatCount ? ' — ' + s.pendingRetakeSubjects.join(', ') : ''}</div></div>
     <div class="stat-card"><div class="label">Subjects sat more than once</div><div class="value">${multiAttemptSubjects.length}${multiAttemptSubjects.length ? ' — ' + multiAttemptSubjects.join(', ') : ''}</div></div>
+    <div class="stat-card"><div class="label">Subjects yet to be taken</div><div class="value">${yetToTake.length}${yetToTake.length ? ' — ' + yetToTake.join(', ') : ''}</div></div>
   `;
 
   const rows = records.map(r => renderRecordRow(r)).join('');
@@ -1927,7 +1955,13 @@ function renderRecordRow(r) {
         <button class="btn small primary" data-save="${r.id}">Save</button>
         <button class="btn small" data-cancel="1">Cancel</button>
       </td>
-    </tr>`;
+    </tr>
+    ${isRetake ? `<tr><td colspan="10" style="background:var(--warn-soft);color:var(--warn);font-size:0.74rem;padding:6px 10px">
+      ⚠ This result is currently marked as pending retake. If you're entering the result of that
+      retake or resit, cancel this edit and use "Add result" below instead — it'll preserve this
+      record and add the new one alongside it. Saving changes here replaces this record in place,
+      permanently.
+    </td></tr>` : ''}`;
   }
   const attemptInfo = getAttemptInfo(r.studentId, r);
   // Resit has no count shown at all (every real same-semester case so far
@@ -2003,6 +2037,23 @@ function wireRecordRowEvents() {
       const id = btn.dataset.save;
       const beforeRaw = Store.records.find(r => r.id === id);
       const before = beforeRaw ? { ...beforeRaw } : null;
+      // The exact mistake that caused a real data-loss bug earlier in this
+      // build, now caught at a second entry point: editing a currently-
+      // capped record to no longer need a retake replaces it in place,
+      // discarding the original attempt, instead of preserving it alongside
+      // a new resolved row the way "Add result" -> Resit does. Only warn on
+      // this specific transition — a same-status correction (still capped,
+      // just fixing a typo'd mark) is a legitimate, safe use of Edit.
+      if (before && (before.needRetake === 1 || before.needRetake === true) && !patch.needRetake) {
+        const proceed = confirm(
+          'This result is currently marked as needing a retake. Saving will replace it in place '
+          + 'with these new marks, with no separate record of the original attempt.\n\n'
+          + 'If this is actually the result of a retake or resit sitting, click Cancel and use '
+          + '"Add result" below instead — choosing Resit there preserves this record and adds the '
+          + 'new one alongside it.\n\nContinue editing this record in place anyway?'
+        );
+        if (!proceed) return;
+      }
       try {
         await Store.updateRecord(id, patch);
         if (before) {
@@ -2210,6 +2261,37 @@ function renderAuditView() {
       them at once — no need to open each student's page individually anymore, though that still works too
       for one at a time. Selection clears when you switch intake or change the status filter, so it can't
       silently carry over to a different set of students than you were looking at.</p>
+    </div>
+    <div class="audit-item">
+      <strong>Fixed a real bug: resolved prior attempts were still defaulting to Resit</strong><span class="tag">Fixed</span>
+      <p>Caught directly from a PDF import preview: five rows showing "earlier attempt on file, already
+      resolved — not a pending resit" were still pre-selecting <strong>Resit</strong> as the default action.
+      The note was right, the default was wrong — a genuine bug in the default-action logic (in both the PDF
+      import and the single-result form), which checked "is there any prior-semester record at all," not "is
+      there a prior-semester record that's still pending." Any subject a student had already passed cleanly
+      in an earlier semester was defaulting to Resit the moment it showed up again in a new import, with
+      nothing left to actually resolve. Fixed to key off the pending check alone — a resolved prior attempt
+      now correctly defaults to <strong>First time</strong>, same as if there were no history at all.</p>
+    </div>
+    <div class="audit-item">
+      <strong>Fixed: a batch's first exam period in its own intake month couldn't be imported</strong><span class="tag">Fixed</span>
+      <p>Three rows for batch DBS2601 failed to import with "couldn't work out which semester this is" — the
+      semester formula requires the exam period to fall at least one month after the batch's intake month,
+      and for DBS2601 the exam period (January 2026) was the exact same month as intake. Checked the batch's
+      18 existing records before changing anything: every one is already semester 1, confirming this is that
+      cohort's first exam period, not a data error. Fixed narrowly — an exam period in the same month as
+      intake now resolves to semester 1 instead of being rejected; every other case (one month or more after
+      intake) is computed exactly as before, unaffected.</p>
+    </div>
+    <div class="audit-item">
+      <strong>New: subjects a student hasn't taken yet, for every student</strong><span class="tag">Added</span>
+      <p>A new stat alongside "Pending subjects" — "Subjects yet to be taken," both on the student page and as
+      a column in the intake table. Different from pending: a pending subject has been sat and capped,
+      awaiting resolution; this is a subject with no record at all yet. There's no separate curriculum list
+      to check against, so this is approximated as every subject code anyone else in the same batch has ever
+      been recorded against, minus whatever this specific student already has a record for — reasonable for a
+      cohort that shares one curriculum, though a subject nobody in the batch has reached yet won't show up
+      here either, since nothing yet establishes it as part of the curriculum.</p>
     </div>
     <div class="audit-item">
       <strong>Re-verified: resit (same semester) vs retake (different semester), against every real case</strong><span class="tag">Investigated</span>
@@ -2477,7 +2559,11 @@ function buildSingleResultPlan(rec) {
   let defaultAction;
   if (sameSemesterIsThePendingOne) defaultAction = 'resit';
   else if (sameSemesterExisting) defaultAction = 'update';
-  else if (otherSemesterExisting) defaultAction = 'resit';
+  // Keyed off pendingPrior, not otherSemesterExisting — see the identical
+  // fix and explanation on buildPdfResultsPlan. A resolved prior attempt in
+  // a different semester means nothing is actually pending, so this is a
+  // fresh sitting (First time), not a Resit.
+  else if (pendingPrior) defaultAction = 'resit';
   else defaultAction = 'add';
   return {
     rec,
@@ -3299,7 +3385,16 @@ function deriveSemesterFromBatchAndPeriod(batch, examPeriod) {
   const batchYear = 2000 + Number(bm[1]), batchMonth = Number(bm[2]);
   const examYear = Number(yearStr), examMonth = examMonthIdx + 1;
   const elapsed = (examYear * 12 + examMonth) - (batchYear * 12 + batchMonth);
-  if (elapsed <= 0) return null;
+  if (elapsed < 0) return null;
+  // elapsed === 0 means the exam period is the same calendar month as the
+  // batch's own intake month — ceil(0/3) would give 0, which isn't a valid
+  // semester. Confirmed against real data before treating this as semester
+  // 1 rather than rejecting it: every one of DBS2601's 18 existing records
+  // (the batch that surfaced this) is already semester 1, consistent with
+  // this being that cohort's first exam period, not an error. Every
+  // elapsed value of 1 or more is unaffected — still the original,
+  // separately-validated ceil(elapsed/3).
+  if (elapsed === 0) return 1;
   return Math.ceil(elapsed / 3);
 }
 
@@ -3359,7 +3454,14 @@ function buildPdfResultsPlan(header) {
     // sitting is a resit, even in the edge case where this system has no
     // prior record of it (e.g. the original failing attempt predates this
     // system) — trusted the same as finding actual prior history ourselves.
-    else if (pendingPrior || otherSemesterExisting || row.cmsResitMarker) defaultAction = 'resit';
+    // Deliberately NOT keying off otherSemesterExisting here (a real bug
+    // this was: any cross-semester history at all, resolved or not, was
+    // defaulting to Resit — even a subject the student had already passed
+    // cleanly in an earlier semester). Only an actually-pending prior
+    // attempt, or the CMS's own marker, should suggest Resit; a resolved
+    // prior attempt means there's nothing to resolve, so this is a fresh
+    // sitting — First time, same as if there were no history at all.
+    else if (pendingPrior || row.cmsResitMarker) defaultAction = 'resit';
     else defaultAction = 'add';
 
     plan.items.push({
