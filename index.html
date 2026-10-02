@@ -2138,6 +2138,16 @@ function renderAuditView() {
       silently carry over to a different set of students than you were looking at.</p>
     </div>
     <div class="audit-item">
+      <strong>PDF preview: flags pending resits, confirmed re-upload safety</strong><span class="tag">Added</span>
+      <p>Checked the re-upload case directly: importing the exact same PDF twice already defaulted every row
+      to Skip the second time around — confirmed working, no change needed there. New on top of that: any row
+      where the student has an earlier capped, unresolved attempt at this subject now gets a clearly flagged
+      note showing that prior attempt's semester, marks, and grade, plus a count at the top ("3 of them have a
+      pending resit from an earlier semester") — so spotting which rows genuinely need Resit, versus a plain
+      first sitting, doesn't require checking each student's history by hand. A prior attempt that's already
+      resolved cleanly is also called out, specifically so it's not mistaken for a pending one.</p>
+    </div>
+    <div class="audit-item">
       <strong>New: preview and choice before confirming a single result too</strong><span class="tag">Added</span>
       <p>The one-at-a-time "Add result" form no longer saves immediately on submit — it now shows a preview
       first: the derived grade, whether it's capped, and a choice of <strong>First time</strong> /
@@ -3039,6 +3049,12 @@ function buildPdfResultsPlan(header) {
       r.studentId === row.studentId && r.subjectCode === header.subjectCode && r.semester === semester);
     const otherSemesterExisting = Store.records.find(r =>
       r.studentId === row.studentId && r.subjectCode === header.subjectCode && r.semester !== semester);
+    // The specific prior attempt that's still capped and unresolved, if any
+    // — this is what actually needs a resit, as opposed to a prior attempt
+    // that already passed cleanly. Surfaced in the preview so you can spot
+    // who genuinely needs Resit without checking each student's history
+    // yourself.
+    const pendingPrior = findPendingRetake(row.studentId, header.subjectCode, sameSemesterExisting ? sameSemesterExisting.id : null);
 
     let defaultAction;
     if (sameSemesterExisting && sameSemesterExisting.marks === row.marks) defaultAction = 'skip';
@@ -3050,6 +3066,7 @@ function buildPdfResultsPlan(header) {
       row, semester, needRetake,
       sameSemesterExistingId: sameSemesterExisting ? sameSemesterExisting.id : null,
       hasOtherSemesterHistory: !!otherSemesterExisting,
+      pendingPrior: pendingPrior ? { marks: pendingPrior.marks, grade: pendingPrior.grade, semester: pendingPrior.semester } : null,
       action: defaultAction,
     });
   }
@@ -3096,10 +3113,13 @@ function renderPdfImportPreview(header, plan) {
       .map(a => `<option value="${a}" ${item.action === a ? 'selected' : ''}>${ACTION_LABELS[a]}</option>`).join('');
     const contextNote = item.sameSemesterExistingId
       ? (item.action === 'skip' ? 'identical to what\u2019s already on file' : 'a record already exists for this student, subject and semester')
-      : item.hasOtherSemesterHistory ? 'this student has an earlier attempt at this subject on file' : '';
+      : item.pendingPrior
+        ? `⚠ prior attempt Sem ${item.pendingPrior.semester}: ${item.pendingPrior.marks} marks (${item.pendingPrior.grade}) — still pending, this will resolve it`
+        : item.hasOtherSemesterHistory ? 'earlier attempt on file, already resolved — not a pending resit' : '';
+    const alertStyle = item.pendingPrior ? ' style="color:var(--warn);font-weight:600"' : '';
     return `<div class="mapping-row" data-pdf-row="${i}">
       <span style="min-width:150px">${escapeHtml(item.row.name)} (${item.row.studentId})</span>
-      <span class="credit-note">Sem ${item.semester} · marks ${item.row.marks}, ${item.row.pdfGrade}${item.needRetake ? ' — capped' : ''}${contextNote ? ` · ${contextNote}` : ''}</span>
+      <span class="credit-note">Sem ${item.semester} · marks ${item.row.marks}, ${item.row.pdfGrade}${item.needRetake ? ' — capped' : ''}${contextNote ? `<br><span${alertStyle}>${contextNote}</span>` : ''}</span>
       <select class="pdf-action-select" data-idx="${i}" style="margin-left:auto;font-size:0.78rem;padding:3px 6px">${options}</select>
       <label style="font-size:0.76rem;color:var(--muted)">Sem
         <input type="number" class="pdf-sem-input" data-idx="${i}" value="${item.semester}" min="1" max="7" style="width:44px;padding:3px 5px;margin-left:4px">
@@ -3113,8 +3133,12 @@ function renderPdfImportPreview(header, plan) {
     : '';
 
   const actionableCount = plan.items.filter(i => i.action !== 'skip').length;
+  const pendingCount = plan.items.filter(i => i.pendingPrior).length;
+  const pendingSummary = pendingCount
+    ? ` <strong style="color:var(--warn)">${pendingCount} of them ${pendingCount === 1 ? 'has' : 'have'} a pending resit from an earlier semester</strong> — flagged below.`
+    : '';
   el.innerHTML = headerInfo + `
-    <p class="note">${plan.items.length} result${plan.items.length === 1 ? '' : 's'} found. Each one's action is pre-picked based on
+    <p class="note">${plan.items.length} result${plan.items.length === 1 ? '' : 's'} found.${pendingSummary} Each one's action is pre-picked based on
     what's already on file — change any of them before confirming, and double-check semester for anyone who's
     taken a leave of absence or repeated a semester. Nothing is saved until you confirm.</p>
     ${rowsHtml}
