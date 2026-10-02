@@ -593,6 +593,7 @@ table.data td.checkbox-cell, table.data th.checkbox-cell { width: 30px; }
     <div class="topbar-actions">
       <button id="export-excel">Export Excel</button>
       <button id="export-pdf">Export PDF</button>
+      <button id="undo-last-action" class="admin-only" style="display:none">Undo</button>
       <button id="open-pdf-import" class="primary admin-only">Import PDF</button>
       <button id="open-settings" class="primary admin-only">Settings</button>
       <button id="sign-out" style="display:none">Sign out</button>
@@ -933,6 +934,12 @@ const DEFAULT_FIREBASE_CONFIG = {
 // substantive change versus the old table: marks 35-39 used to be a
 // distinct "D" pass worth 1.0 point — that band is gone, folded into F
 // (0.0) here. D+ is simply renamed to D (still 1.33, no scoring change).
+// The separate "E" band below that (marks 0-34) is untouched — same letter,
+// same 0.0 points, as it always was. (An earlier version of this table
+// mistakenly also renamed E to F for every band below 35, when only the
+// 35-39 band was ever meant to change — fixed, since the point value was
+// always correct either way but the letter shown and exported was wrong
+// for every jun2026-tagged result scoring under 35.)
 const GRADING_TABLE_JUN2026 = [
   { markMin: 100, grade: 'A', gradePoint: 4.00, achievement: 'Distinction' },
   { markMin: 95, grade: 'A', gradePoint: 4.00, achievement: 'Distinction' },
@@ -948,13 +955,13 @@ const GRADING_TABLE_JUN2026 = [
   { markMin: 45, grade: 'C-', gradePoint: 1.67, achievement: 'Fail' },
   { markMin: 40, grade: 'D', gradePoint: 1.33, achievement: 'Fail' },
   { markMin: 35, grade: 'F', gradePoint: 0.00, achievement: 'Fail' },
-  { markMin: 30, grade: 'F', gradePoint: 0.00, achievement: 'Fail' },
-  { markMin: 25, grade: 'F', gradePoint: 0.00, achievement: 'Fail' },
-  { markMin: 20, grade: 'F', gradePoint: 0.00, achievement: 'Fail' },
-  { markMin: 15, grade: 'F', gradePoint: 0.00, achievement: 'Fail' },
-  { markMin: 10, grade: 'F', gradePoint: 0.00, achievement: 'Fail' },
-  { markMin: 5, grade: 'F', gradePoint: 0.00, achievement: 'Fail' },
-  { markMin: 0, grade: 'F', gradePoint: 0.00, achievement: 'Fail' },
+  { markMin: 30, grade: 'E', gradePoint: 0.00, achievement: 'Fail' },
+  { markMin: 25, grade: 'E', gradePoint: 0.00, achievement: 'Fail' },
+  { markMin: 20, grade: 'E', gradePoint: 0.00, achievement: 'Fail' },
+  { markMin: 15, grade: 'E', gradePoint: 0.00, achievement: 'Fail' },
+  { markMin: 10, grade: 'E', gradePoint: 0.00, achievement: 'Fail' },
+  { markMin: 5, grade: 'E', gradePoint: 0.00, achievement: 'Fail' },
+  { markMin: 0, grade: 'E', gradePoint: 0.00, achievement: 'Fail' },
 ];
 
 // Every new record created from here on is tagged with this — see
@@ -1228,16 +1235,20 @@ const Store = {
     Auth.authInstance = null;
     localStorage.removeItem('soim_firebase_config');
     document.body.classList.add('authenticated');
+    clearUndoableAction(); // see the same note in onAuthStateChanged's sign-out branch
     this._loadLocal();
   },
 
   async addRecord(rec) {
     if (this.mode === 'firestore') {
-      await this.db.collection('records').add(rec);
+      const ref = await this.db.collection('records').add(rec);
+      return ref.id;
     } else {
-      this.records.push({ ...rec, id: 'local-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7) });
+      const id = 'local-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+      this.records.push({ ...rec, id });
       this._saveLocalRecords();
       this._notify();
+      return id;
     }
   },
 
@@ -1257,6 +1268,23 @@ const Store = {
       await this.db.collection('records').doc(id).delete();
     } else {
       this.records = this.records.filter(r => r.id !== id);
+      this._saveLocalRecords();
+      this._notify();
+    }
+  },
+
+  // A true replace, not a merge — unlike updateRecord (Firestore .update(),
+  // local Object.assign), this clears any field not present in fullData
+  // rather than leaving it untouched. Needed specifically for undo: if the
+  // forward edit added a field that wasn't there before (e.g. setting
+  // resolvesPriorAttempt), a merge-based restore would leave that field in
+  // place rather than actually reverting to the exact prior state.
+  async replaceRecord(id, fullData) {
+    if (this.mode === 'firestore') {
+      await this.db.collection('records').doc(id).set(fullData);
+    } else {
+      const idx = this.records.findIndex(r => r.id === id);
+      if (idx !== -1) this.records[idx] = { ...fullData, id };
       this._saveLocalRecords();
       this._notify();
     }
@@ -1423,6 +1451,10 @@ const Auth = {
         this.currentRole = null;
         document.body.classList.remove('authenticated');
         Store._unsubscribeAll();
+        // A tracked undo references specific record ids in this session's
+        // project — meaningless, or worse, misleading in whatever loads
+        // next (a different sign-in, a different project).
+        clearUndoableAction();
       }
       render();
     });
@@ -1593,7 +1625,13 @@ function getSubjectAttempts(studentId, subjectCode) {
 function getAttemptInfo(studentId, record) {
   const attempts = getSubjectAttempts(studentId, record.subjectCode);
   const attemptNumber = attempts.findIndex(r => r.id === record.id) + 1;
-  return { attemptNumber: attemptNumber || 1, totalAttempts: attempts.length };
+  // Resit vs retake, by this conversation's own established distinction:
+  // every attempt sharing the same semester is a resit; spanning more than
+  // one semester is a retake. Validated earlier against all 45 real
+  // multi-attempt cases with no exceptions either way.
+  const allSameSemester = attempts.length > 0 && attempts.every(a => a.semester === attempts[0].semester);
+  const failedCount = attempts.filter(a => a.needRetake === 1 || a.needRetake === true).length;
+  return { attemptNumber: attemptNumber || 1, totalAttempts: attempts.length, isResit: allSameSemester, failedCount };
 }
 
 // ---------------------------------------------------------------------------
@@ -1608,6 +1646,7 @@ function setView(view, extra = {}) {
 
 function render() {
   document.body.classList.toggle('role-admin', isAdmin());
+  renderUndoButton();
   autoPromoteGraduates();
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   renderIntakeTabs();
@@ -1729,7 +1768,7 @@ function renderIntakeView() {
       <th>Total Cum Ct (incl. MPU)</th>
       ${semCols.map(n => `<th>GPA Sem ${n}</th>`).join('')}
       <th class="highlight">CGPA Temp.</th><th>CGPA Final</th>
-      <th>Eligibility</th><th>Repeats needed</th>
+      <th>Eligibility</th><th>Repeats needed</th><th>Pending subjects</th>
     </tr>`;
 
   const tbody = rows.map(r => {
@@ -1747,6 +1786,7 @@ function renderIntakeView() {
       ${semCols.map(n => `<td>${s.gpaBySemester[n] ?? '–'}</td>`).join('')}
       <td class="highlight">${s.cgpaTemporary ?? '–'}</td><td>${s.cgpaFinal ?? '–'}</td>
       <td>${pill}</td><td>${s.repeatCount}</td>
+      <td>${s.repeatCount ? escapeHtml(s.pendingRetakeSubjects.join(', ')) : '–'}</td>
     </tr>`;
   }).join('');
 
@@ -1818,8 +1858,14 @@ function renderStudentView() {
     }
   };
 
+  // Retake only, not resit — a same-semester resit is a routine
+  // supplementary sitting, not the kind of "had to repeat a whole semester"
+  // event this stat is meant to surface.
   const multiAttemptSubjects = [...new Set(records.map(r => r.subjectCode))]
-    .filter(code => getSubjectAttempts(state.studentId, code).length > 1);
+    .filter(code => {
+      const attempts = getSubjectAttempts(state.studentId, code);
+      return attempts.length > 1 && !attempts.every(a => a.semester === attempts[0].semester);
+    });
 
   document.getElementById('student-stats').innerHTML = `
     <div class="stat-card"><div class="label">CGPA (Final)</div><div class="value">${s.cgpaFinal ?? '–'}</div></div>
@@ -1884,8 +1930,18 @@ function renderRecordRow(r) {
     </tr>`;
   }
   const attemptInfo = getAttemptInfo(r.studentId, r);
+  // Resit has no count shown at all (every real same-semester case so far
+  // has been exactly one resit, so a number would just always read "1" —
+  // see the validation note on getAttemptInfo above); retake keeps the
+  // count, since a subject really can be retaken more than once, but the
+  // word itself stays singular either way.
+  const passedAfterText = attemptInfo.isResit
+    ? ' — passed after resit'
+    : ' — passed after ' + (attemptInfo.totalAttempts - 1) + ' retake';
+  const isSevere = attemptInfo.failedCount > 3; // flagged regardless of whether it's since been resolved — a student who needed 4+ sittings to clear (or still hasn't) is worth surfacing either way
+  const attemptNoteStyle = isSevere ? 'color:var(--warn);font-weight:600' : 'color:var(--muted)';
   const attemptNote = attemptInfo.totalAttempts > 1
-    ? `<br><span style="color:var(--muted);font-size:0.72rem">attempt ${attemptInfo.attemptNumber} of ${attemptInfo.totalAttempts}${attemptInfo.attemptNumber === attemptInfo.totalAttempts && !isRetake ? ' — passed after ' + (attemptInfo.totalAttempts - 1) + ' retake' + (attemptInfo.totalAttempts - 1 === 1 ? '' : 's') : ''}</span>`
+    ? `<br><span style="${attemptNoteStyle};font-size:0.72rem">attempt ${attemptInfo.attemptNumber} of ${attemptInfo.totalAttempts}${attemptInfo.attemptNumber === attemptInfo.totalAttempts && !isRetake ? passedAfterText : ''}${isSevere ? ' ⚠' : ''}</span>`
     : '';
   return `<tr>
     <td>Sem ${r.semester}</td>
@@ -1911,8 +1967,17 @@ function wireRecordRowEvents() {
   document.querySelectorAll('#student-table [data-del]').forEach(btn => {
     btn.addEventListener('click', async () => {
       if (!confirm('Remove this result record?')) return;
+      const id = btn.dataset.del;
+      const beforeRaw = Store.records.find(r => r.id === id);
+      const before = beforeRaw ? { ...beforeRaw } : null;
       try {
-        await Store.deleteRecord(btn.dataset.del);
+        await Store.deleteRecord(id);
+        if (before) {
+          const { id: _drop, ...withoutId } = before;
+          setUndoableAction(`removed ${before.subjectCode} (Sem ${before.semester}) for ${before.name}`, async () => {
+            await Store.addRecord(withoutId);
+          });
+        }
         render();
       } catch (err) {
         console.error('Delete failed', err);
@@ -1935,8 +2000,17 @@ function wireRecordRowEvents() {
       if (!patch.needRetake && findPendingRetake(state.studentId, subjectCode, btn.dataset.save)) patch.resolvesPriorAttempt = true;
       const validationError = validateRecordInput(patch);
       if (validationError) { showToast(validationError, true); return; }
+      const id = btn.dataset.save;
+      const beforeRaw = Store.records.find(r => r.id === id);
+      const before = beforeRaw ? { ...beforeRaw } : null;
       try {
-        await Store.updateRecord(btn.dataset.save, patch);
+        await Store.updateRecord(id, patch);
+        if (before) {
+          const { id: _drop, ...beforeFields } = before;
+          setUndoableAction(`updated ${before.subjectCode} (Sem ${before.semester}) for ${before.name}`, async () => {
+            await Store.replaceRecord(id, beforeFields);
+          });
+        }
         editingRecordId = null;
         render();
         showToast('Result updated.');
@@ -2138,6 +2212,92 @@ function renderAuditView() {
       silently carry over to a different set of students than you were looking at.</p>
     </div>
     <div class="audit-item">
+      <strong>Re-verified: resit (same semester) vs retake (different semester), against every real case</strong><span class="tag">Investigated</span>
+      <p>Checked directly at Modulus's request, against the live data rather than just the code: every one of
+      the 45 (student, subject) pairs with more than one attempt on file, grouped by whether the attempts
+      share a semester or span different ones, and compared against what the app's own
+      <code>getAttemptInfo()</code> actually classifies each as. Zero exceptions either way — all 37
+      same-semester pairs classify as Resit, all 8 cross-semester pairs classify as Retake. Of those, 41 are
+      already resolved and produce the exact expected wording ("passed after resit" or "passed after N
+      retake"); the remaining 4 are still pending, correctly showing no "passed after" text at all since
+      nothing's been resolved yet. No student currently has more than 3 failed attempts on one subject, so
+      the chronic-failure flag isn't active for anyone right now — expected, not a gap, since it's there for
+      if that ever happens rather than something today's data should trigger. Full row-by-row breakdown
+      delivered as a spreadsheet alongside this.</p>
+    </div>
+    <div class="audit-item">
+      <strong>Resit/retake wording, a chronic-failure flag, and pending subjects for every student</strong><span class="tag">Added</span>
+      <p>Four related changes, all on the student record view and the intake table:</p>
+      <ul>
+        <li>The attempt note now reads "passed after resit" for a same-semester resit (no count — every real
+        case has been exactly one resit so far, so a number would always just say "1") and "passed after N
+        retake" for a cross-semester retake (count shown, word always singular).</li>
+        <li>A subject with more than 3 failed attempts on file for one student — resolved or still pending,
+        either way — now shows a flagged, bolded note in the same amber/red used for warnings elsewhere, so a
+        student with chronic difficulty on one subject stands out rather than reading the same as a routine
+        single resit.</li>
+        <li>"Subjects sat more than once" on the student page now counts retakes only, not resits — a routine
+        same-semester resit isn't the kind of "had to repeat an entire semester" event this stat was meant to
+        surface, and was inflating the count before this.</li>
+        <li>The intake table, Excel summary sheet, and PDF export all gained a "Pending subjects" column next
+        to "Repeats needed," listing the actual subject codes rather than just the count — built directly
+        from the same per-student pending-subjects list the student page already showed, now surfaced across
+        every student at once rather than one at a time.</li>
+      </ul>
+    </div>
+    <div class="audit-item">
+      <strong>New: an Undo button for admins</strong><span class="tag">Added</span>
+      <p>Tracks the single most recent record-level change — adding, updating, or removing a result, whether
+      through the single-result form, Edit/Remove on an existing row, a PDF import, or a bulk Excel upload —
+      and lets you put it straight back with one click, labelled with what it would undo (e.g. "Undo: added
+      MAC2213 (Sem 3) for ..."). A PDF import or bulk upload is reversed as one whole batch, matching however
+      many rows it actually applied. This is a quick "that was a mistake" for exactly the kind of accident
+      that caused the same-semester resit bug above — not a persistent history: only the latest action is
+      kept, a newer one replaces it, and it doesn't survive a page reload or signing out. Built carefully
+      around one real correctness trap: Firestore's update (and this app's own local-mode equivalent) merges
+      fields rather than replacing them, so if a change added a field that wasn't there before, undoing it
+      with the same merge-based update would leave that field behind instead of actually reverting. Undo uses
+      a true replace instead, confirmed directly by testing a restore where the forward change had added a
+      new field, and checking that field was actually gone afterward, not just reset to its old value.</p>
+    </div>
+    <div class="audit-item">
+      <strong>Fixed: the new grading table showed "F" where it should have shown "E"</strong><span class="tag">Fixed</span>
+      <p>The June 2026 scale change was only ever meant to fold the old 35-39 "D" band into F (0.0 points,
+      documented when that change first went in) — the separate "E" band below that (marks 0-34, also 0.0
+      points) was never meant to change at all. But the table as built mistakenly relabeled every one of
+      those lower bands "F" too. The point value was always correct either way, so this never affected any
+      GPA or CGPA math — it was purely the letter shown and exported that was wrong, for any jun2026-tagged
+      result scoring under 35. Confirmed by testing every band boundary directly (0 through 44) and matching
+      the exact reported case (marks 28 → now correctly "E", not "F") before shipping. Since grades are
+      computed fresh from marks each time rather than stored, every existing record scoring in that range is
+      corrected automatically — nothing to re-enter.</p>
+    </div>
+    <div class="audit-item">
+      <strong>Fixed a real data-loss bug: same-semester resits were silently overwriting the original attempt</strong><span class="tag">Fixed</span>
+      <p>A genuine bug, not a misunderstanding — confirmed by reproducing it directly before touching any
+      code. A same-semester match (student + subject + semester, e.g. a resit sat in the same semester as
+      the original, which 37 real historical cases confirm is completely normal) always defaulted to
+      <strong>Update</strong>, even when that existing record was itself the capped, unresolved attempt. Since
+      Update replaces a record in place, confirming the pre-picked default silently overwrote the original
+      capped attempt's marks and grade — the exact MAC2213 case reported, where the Sem 3 record simply
+      became the new result with no trace of the Sem 3 fail that came before it.<br><br>
+      Root cause: the check for "is there a pending attempt to resolve" was built to exclude the
+      same-semester record from its search, on the assumption that it would only ever matter for the Update
+      path. But a same-semester resit's pending record often <em>is</em> that same-semester match, so
+      excluding it meant it could never be recognized as pending, and the system fell through to Update by
+      default every time. Fixed in both the PDF import and the single-result preview — a same-semester match
+      that's itself capped and unresolved now correctly defaults to <strong>Resit</strong> instead: the
+      original is preserved, a new row is added alongside it, and it's properly resolved via removed grade
+      points — reproduced the exact failing scenario and confirmed both records now survive with the right
+      numbers, before and after this fix.<br><br>
+      <strong>If this already happened to one of your records</strong> (you'll see Removed Grade Points
+      showing "—" on a resit result, with no earlier capped row anywhere above it for that subject), the
+      original attempt's marks aren't recoverable from within the app — there's no undo history built. If
+      you still have the source PDF or your own note of the original (capped) marks, re-add that earlier
+      attempt by hand from the student's page, picking "First time" if it's for an earlier semester or
+      "Resit" won't apply.</p>
+    </div>
+    <div class="audit-item">
       <strong>Fixed: PDF import choked on an asterisk-marked grade (e.g. "*C")</strong><span class="tag">Fixed</span>
       <p>The CMS marks a grade with a leading <code>*</code> to show that specific result came from a resit —
       the parser didn't expect that character at all and rejected the whole row. Now parsed correctly: the
@@ -2293,21 +2453,30 @@ function updateRetakeHint() {
 }
 
 // Same categorization as the PDF/bulk-upload imports, applied to one
-// manually-entered result: a match on student+subject+SAME semester is
-// something to correct in place (Update), a match in a DIFFERENT semester
-// is a genuine repeat of the subject (Resit), and no match at all is a
-// first sitting (First time). Validated against all 45 real multi-attempt
+// manually-entered result. Validated against all 45 real multi-attempt
 // cases in the existing data before this was built: every one of the 37
-// same-semester duplicates fits the resit-being-resolved pattern, and every
-// one of the 8 cross-semester duplicates fits the retake-in-a-later-
-// semester pattern — no exceptions either way.
+// same-semester duplicates fits the resit-being-resolved pattern (so a
+// same-semester match that's ITSELF the pending capped attempt defaults to
+// Resit — preserve it, add a new resolved row), and every one of the 8
+// cross-semester duplicates fits the retake-in-a-later-semester pattern
+// (Resit). A same-semester match that ISN'T pending defaults to Update —
+// more likely a correction to an already-fine record. No match at all is
+// First time. (An earlier version of this defaulted every same-semester
+// match to Update unconditionally, including pending ones — which silently
+// overwrote the original capped attempt instead of preserving it. Fixed.)
 function buildSingleResultPlan(rec) {
   const sameSemesterExisting = Store.records.find(r =>
     r.studentId === rec.studentId && r.subjectCode === rec.subjectCode && r.semester === rec.semester);
   const otherSemesterExisting = Store.records.find(r =>
     r.studentId === rec.studentId && r.subjectCode === rec.subjectCode && r.semester !== rec.semester);
+  // Deliberately not excluding sameSemesterExisting here — see the note
+  // above on buildPdfResultsPlan's identical check.
+  const pendingPrior = findPendingRetake(rec.studentId, rec.subjectCode);
+  const sameSemesterIsThePendingOne = !!(pendingPrior && sameSemesterExisting && pendingPrior.id === sameSemesterExisting.id);
+
   let defaultAction;
-  if (sameSemesterExisting) defaultAction = 'update';
+  if (sameSemesterIsThePendingOne) defaultAction = 'resit';
+  else if (sameSemesterExisting) defaultAction = 'update';
   else if (otherSemesterExisting) defaultAction = 'resit';
   else defaultAction = 'add';
   return {
@@ -2367,14 +2536,32 @@ function renderAddRecordPreview(plan) {
       // Resolved fresh at confirm time, using the same semester-aware
       // check as the categorization above — not whatever the as-you-type
       // hint guessed earlier in the form, which doesn't distinguish same-
-      // vs different-semester the way this does.
-      const pending = findPendingRetake(finalRec.studentId, finalRec.subjectCode, plan.sameSemesterExistingId);
+      // vs different-semester the way this does. No exclusion: Resit
+      // always ADDS a new record rather than replacing
+      // sameSemesterExistingId, and that record is frequently the exact
+      // pending one this needs to find (a same-semester resit) — excluding
+      // it would hide the case that most needs catching.
+      const pending = findPendingRetake(finalRec.studentId, finalRec.subjectCode);
       finalRec.removedGradePoints = pending ? pending.totalGradePoint : (finalRec.removedGradePoints || 0);
       if (pending && finalRec.needRetake === 0) finalRec.resolvesPriorAttempt = true;
     }
     try {
-      if (plan.action === 'update') await Store.updateRecord(plan.sameSemesterExistingId, finalRec);
-      else await Store.addRecord(finalRec);
+      if (plan.action === 'update') {
+        const beforeRaw = Store.records.find(r => r.id === plan.sameSemesterExistingId);
+        const before = beforeRaw ? { ...beforeRaw } : null;
+        await Store.updateRecord(plan.sameSemesterExistingId, finalRec);
+        if (before) {
+          const { id: _drop, ...beforeFields } = before;
+          setUndoableAction(`updated ${finalRec.subjectCode} (Sem ${finalRec.semester}) for ${finalRec.name}`, async () => {
+            await Store.replaceRecord(plan.sameSemesterExistingId, beforeFields);
+          });
+        }
+      } else {
+        const newId = await Store.addRecord(finalRec);
+        setUndoableAction(`added ${finalRec.subjectCode} (Sem ${finalRec.semester}) for ${finalRec.name}`, async () => {
+          await Store.deleteRecord(newId);
+        });
+      }
       const form = document.getElementById('add-record-form');
       form.reset();
       retakeOverridden = false;
@@ -2584,6 +2771,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Export
+  document.getElementById('undo-last-action').addEventListener('click', runUndo);
   document.getElementById('export-excel').addEventListener('click', exportExcel);
   document.getElementById('export-pdf').addEventListener('click', () => exportPDF(state.batch));
 
@@ -2598,6 +2786,57 @@ function showToast(msg, isError = false) {
   t.className = isError ? 'show error' : 'show';
   clearTimeout(showToast._t);
   showToast._t = setTimeout(() => { t.className = ''; }, 3200);
+}
+
+// ---------------------------------------------------------------------------
+// 8b. UNDO LAST ACTION
+// ---------------------------------------------------------------------------
+// Tracks only the single most recent record-level write (add, update,
+// delete — single or as a batch from an import), not a full history: this
+// is a quick "that was a mistake, put it back" for the kind of accident
+// that caused a real data-loss bug earlier in this build (a same-semester
+// resit silently overwriting the original attempt), not a persistent audit
+// trail. In-memory only — it does not survive a page reload, and a newer
+// action always replaces whatever was there before. Each call site is
+// responsible for capturing enough of the "before" state itself (this
+// module only stores and runs the reversal it's given); records are
+// matched for undo by their own id, which Firestore and local mode both
+// assign per-record regardless of which admin or browser made the change.
+let lastUndoableAction = null; // { description, undo: async () => {...} }
+
+function setUndoableAction(description, undoFn) {
+  lastUndoableAction = { description, undo: undoFn };
+  renderUndoButton();
+}
+
+function clearUndoableAction() {
+  lastUndoableAction = null;
+  renderUndoButton();
+}
+
+function renderUndoButton() {
+  const btn = document.getElementById('undo-last-action');
+  if (!btn) return;
+  if (lastUndoableAction && isAdmin()) {
+    btn.style.display = '';
+    btn.title = lastUndoableAction.description;
+  } else {
+    btn.style.display = 'none';
+  }
+}
+
+async function runUndo() {
+  if (!lastUndoableAction) return;
+  const { description, undo } = lastUndoableAction;
+  try {
+    await undo();
+    clearUndoableAction();
+    render();
+    showToast(`Undone: ${description}`);
+  } catch (err) {
+    console.error('Undo failed', err);
+    showToast('Could not undo — check your Firestore rules and connection.', true);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2897,15 +3136,49 @@ function renderResultsPreview(plan) {
       <button class="btn primary" id="confirm-results-upload">Apply changes</button>
     </div>`;
   document.getElementById('confirm-results-upload').addEventListener('click', async () => {
-    if (plan.toDelete.length && !confirm(`This will permanently delete ${plan.toDelete.length} result record${plan.toDelete.length === 1 ? '' : 's'}. This can't be undone. Continue?`)) return;
+    if (plan.toDelete.length && !confirm(`This will permanently delete ${plan.toDelete.length} result record${plan.toDelete.length === 1 ? '' : 's'}. Continue?`)) return;
     el.innerHTML = '<p class="note">Applying…</p>';
     let done = 0, failed = 0;
-    for (const { record } of plan.toAdd) { try { await Store.addRecord(record); done++; } catch (e) { failed++; } }
-    for (const { id, record } of plan.toReplace) { try { await Store.updateRecord(id, record); done++; } catch (e) { failed++; } }
-    for (const { id } of plan.toDelete) { try { await Store.deleteRecord(id); done++; } catch (e) { failed++; } }
+    const undoAdds = [], undoUpdates = [], undoDeletes = [];
+    for (const { record } of plan.toAdd) {
+      try { undoAdds.push(await Store.addRecord(record)); done++; } catch (e) { failed++; }
+    }
+    for (const { id, record } of plan.toReplace) {
+      const beforeRaw = Store.records.find(r => r.id === id);
+      const before = beforeRaw ? { ...beforeRaw } : null;
+      try {
+        await Store.updateRecord(id, record);
+        if (before) { const { id: _drop, ...beforeFields } = before; undoUpdates.push({ id, beforeFields }); }
+        done++;
+      } catch (e) { failed++; }
+    }
+    for (const { id } of plan.toDelete) {
+      const beforeRaw = Store.records.find(r => r.id === id);
+      const before = beforeRaw ? { ...beforeRaw } : null;
+      try {
+        await Store.deleteRecord(id);
+        if (before) { const { id: _drop, ...beforeFields } = before; undoDeletes.push(beforeFields); }
+        done++;
+      } catch (e) { failed++; }
+    }
+    if (done && (undoAdds.length || undoUpdates.length || undoDeletes.length)) {
+      setUndoableAction(`applied ${done} bulk-upload change${done === 1 ? '' : 's'}`, async () => {
+        for (const id of undoAdds) await Store.deleteRecord(id);
+        for (const u of undoUpdates) await Store.replaceRecord(u.id, u.beforeFields);
+        for (const rec of undoDeletes) await Store.addRecord(rec);
+      });
+    }
     pendingResultsPlan = null;
     document.getElementById('results-file-input').value = '';
     el.innerHTML = '';
+    // This modal's backdrop covers the whole viewport, including the
+    // topbar's Undo button — leaving it open would make an action that
+    // just became undoable immediately un-undoable without an extra click
+    // to get out of the way first. document.getElementById, not the
+    // settingsModal closure variable from the DOMContentLoaded setup block
+    // — this function is defined outside that closure and doesn't have
+    // access to it.
+    document.getElementById('settings-modal').classList.remove('open');
     showToast(failed ? `Applied ${done}, ${failed} failed — check your connection and try those rows again.` : `Applied ${done} change${done === 1 ? '' : 's'}.`, !!failed);
     render();
   });
@@ -3066,19 +3339,27 @@ function buildPdfResultsPlan(header) {
       r.studentId === row.studentId && r.subjectCode === header.subjectCode && r.semester !== semester);
     // The specific prior attempt that's still capped and unresolved, if any
     // — this is what actually needs a resit, as opposed to a prior attempt
-    // that already passed cleanly. Surfaced in the preview so you can spot
-    // who genuinely needs Resit without checking each student's history
-    // yourself.
-    const pendingPrior = findPendingRetake(row.studentId, header.subjectCode, sameSemesterExisting ? sameSemesterExisting.id : null);
+    // that already passed cleanly. Deliberately NOT excluding the
+    // same-semester match here: a resit can land in the SAME semester as
+    // the attempt it resolves (confirmed earlier against 37 real cases),
+    // so the pending record this is looking for might *be*
+    // sameSemesterExisting itself — excluding it would hide exactly the
+    // case that most needs catching, which is what caused a real bug: a
+    // same-semester resit defaulted to Update and silently overwrote the
+    // original capped attempt instead of preserving it alongside a new,
+    // properly-resolved row.
+    const pendingPrior = findPendingRetake(row.studentId, header.subjectCode);
+    const sameSemesterIsThePendingOne = !!(pendingPrior && sameSemesterExisting && pendingPrior.id === sameSemesterExisting.id);
 
     let defaultAction;
     if (sameSemesterExisting && sameSemesterExisting.marks === row.marks) defaultAction = 'skip';
-    else if (sameSemesterExisting) defaultAction = 'update';
+    else if (sameSemesterIsThePendingOne) defaultAction = 'resit'; // the same-semester match IS the capped attempt — preserve it, add a new resolved row
+    else if (sameSemesterExisting) defaultAction = 'update'; // same-semester match exists but isn't pending — more likely a correction
     // The CMS's own "*" marker on the grade is direct confirmation this
     // sitting is a resit, even in the edge case where this system has no
     // prior record of it (e.g. the original failing attempt predates this
     // system) — trusted the same as finding actual prior history ourselves.
-    else if (otherSemesterExisting || row.cmsResitMarker) defaultAction = 'resit';
+    else if (pendingPrior || otherSemesterExisting || row.cmsResitMarker) defaultAction = 'resit';
     else defaultAction = 'add';
 
     plan.items.push({
@@ -3105,7 +3386,12 @@ function buildPdfRecord(header, item) {
     marks: item.row.marks, needRetake: item.needRetake,
   };
   if (item.action === 'resit') {
-    const pending = findPendingRetake(item.row.studentId, header.subjectCode, item.sameSemesterExistingId);
+    // No exclusion here — this action always ADDS a new record rather than
+    // replacing sameSemesterExistingId, so that record is never "itself"
+    // from this write's point of view. It's frequently the exact pending
+    // record this needs to find and resolve (a same-semester resit), so
+    // excluding it would hide the one case this most needs to catch.
+    const pending = findPendingRetake(item.row.studentId, header.subjectCode);
     base.removedGradePoints = pending ? pending.totalGradePoint : 0;
     if (pending && item.needRetake === 0) base.resolvesPriorAttempt = true;
   } else {
@@ -3184,15 +3470,33 @@ function renderPdfImportPreview(header, plan) {
   document.getElementById('confirm-pdf-import').addEventListener('click', async () => {
     el.innerHTML = headerInfo + '<p class="note">Applying…</p>';
     let done = 0, failed = 0;
+    const undoAdds = []; // ids to delete
+    const undoUpdates = []; // {id, beforeFields} to replace back
     for (const item of plan.items) {
       if (item.action === 'skip') continue;
       try {
         const record = buildPdfRecord(header, item);
         record.gradingVersion = CURRENT_GRADING_VERSION;
-        if (item.action === 'update') await Store.updateRecord(item.sameSemesterExistingId, record);
-        else await Store.addRecord(record);
+        if (item.action === 'update') {
+          const beforeRaw = Store.records.find(r => r.id === item.sameSemesterExistingId);
+          const before = beforeRaw ? { ...beforeRaw } : null;
+          await Store.updateRecord(item.sameSemesterExistingId, record);
+          if (before) {
+            const { id: _drop, ...beforeFields } = before;
+            undoUpdates.push({ id: item.sameSemesterExistingId, beforeFields });
+          }
+        } else {
+          const newId = await Store.addRecord(record);
+          undoAdds.push(newId);
+        }
         done++;
       } catch (e) { failed++; }
+    }
+    if (done && (undoAdds.length || undoUpdates.length)) {
+      setUndoableAction(`imported ${done} result${done === 1 ? '' : 's'} from ${header.subjectCode}`, async () => {
+        for (const id of undoAdds) await Store.deleteRecord(id);
+        for (const u of undoUpdates) await Store.replaceRecord(u.id, u.beforeFields);
+      });
     }
     pendingPdfPlan = null;
     document.getElementById('pdf-file-input').value = '';
@@ -3248,6 +3552,7 @@ function exportExcel() {
       row['CGPA Final'] = sum.cgpaFinal;
       row['Eligibility to graduate'] = sum.eligibility;
       row['Number of repeat subject required'] = sum.repeatCount;
+      row['Pending subjects'] = sum.repeatCount ? sum.pendingRetakeSubjects.join(', ') : '';
       return row;
     });
     const ws = XLSX.utils.json_to_sheet(rows);
@@ -3299,7 +3604,7 @@ function exportPDF(batch) {
     return [
       s.name, s.studentId, STATUS_LABEL[s.status] || 'Active', sum.totalCumGradePoint, sum.totalCumGradePointExclRepeat,
       sum.totalCumCt, sum.totalCumCtExclRepeat, sum.cgpaTemporary ?? '–', sum.cgpaFinal ?? '–',
-      sum.eligibility, sum.repeatCount,
+      sum.eligibility, sum.repeatCount, sum.repeatCount ? sum.pendingRetakeSubjects.join(', ') : '–',
     ];
   });
   doc.setFontSize(14);
@@ -3308,9 +3613,9 @@ function exportPDF(batch) {
   doc.text(`Generated ${new Date().toLocaleDateString()} · withdrawn students excluded`, 14, 21);
   doc.autoTable({
     startY: 26,
-    head: [['Name', 'Student ID', 'Status', 'Total Cum GP', 'Total Cum GP (excl. repeat)', 'Total Cum Ct', 'Total Cum Ct (excl. repeat)', 'CGPA Temp', 'CGPA Final', 'Eligibility', 'Repeats needed']],
+    head: [['Name', 'Student ID', 'Status', 'Total Cum GP', 'Total Cum GP (excl. repeat)', 'Total Cum Ct', 'Total Cum Ct (excl. repeat)', 'CGPA Temp', 'CGPA Final', 'Eligibility', 'Repeats needed', 'Pending subjects']],
     body: rows,
-    styles: { fontSize: 8 },
+    styles: { fontSize: 7 },
     headStyles: { fillColor: [217, 234, 211], textColor: [28, 43, 69] },
   });
   doc.save(`SoIM_CGPA_${batch}_${new Date().toISOString().slice(0, 10)}.pdf`);
