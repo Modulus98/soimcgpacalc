@@ -646,6 +646,31 @@ table.data td.checkbox-cell, table.data th.checkbox-cell { width: 30px; }
   .add-record-form { grid-template-columns: 1fr 1fr; }
 }
 
+/* "auto" tag next to a Removed GP the system netted by itself */
+.auto-tag { display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 3px; background: #e6efe3; color: #1d5a24; font-size: 0.66rem; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; vertical-align: 1px; }
+
+/* ---- Student Performance Summary ---- */
+.perf-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin: 4px 0 16px; }
+.perf-controls .field { min-width: 150px; }
+.perf-controls .field.grow { flex: 1 1 200px; }
+.perf-actions { display: flex; gap: 8px; margin-left: auto; }
+.perf-rule { color: var(--muted); font-size: 0.82rem; margin: 6px 0 4px; max-width: 80ch; }
+.perf-section { margin: 22px 0 6px; }
+.perf-section h3 { margin: 0 0 8px; font-family: 'Source Serif 4', serif; font-size: 1.05rem; }
+.perf-count { margin-left: 10px; font-family: inherit; font-size: 0.78rem; font-weight: 400; color: var(--muted); }
+.perf-empty { color: var(--muted); font-size: 0.85rem; margin: 4px 0 0; }
+.perf-lowload { margin-top: 8px; font-size: 0.82rem; color: var(--muted); }
+.perf-lowload summary { cursor: pointer; }
+.perf-lowload ul { margin: 6px 0 0 18px; padding: 0; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--ink); }
+
+/* Phone width: the section tabs (the new one has a long name) need to fit. */
+@media (max-width: 560px) {
+  .top-tabs { padding: 0 8px; gap: 0; }
+  .top-tab { padding: 12px 11px; font-size: 0.84rem; }
+}
+
 </style>
 </head>
 <body>
@@ -775,6 +800,19 @@ table.data td.checkbox-cell, table.data th.checkbox-cell { width: 30px; }
       <div class="admin-only" id="add-record-preview" style="display:none"></div>
 
       <div class="table-wrap" id="student-table"></div>
+    </section>
+
+    <section id="view-performance" class="view">
+      <div class="view-header">
+        <div>
+          <h2>Student Performance Summary</h2>
+          <div class="sub" id="perf-sub">President's List, Dean's List and Probation, by semester</div>
+        </div>
+      </div>
+      <div class="perf-controls" id="perf-controls"></div>
+      <div class="stat-row" id="perf-stats"></div>
+      <p class="perf-rule" id="perf-rule"></p>
+      <div id="perf-body"></div>
     </section>
 
     <section id="view-audit" class="view">
@@ -1268,6 +1306,34 @@ function computeStudentSummary(records, config = ENGINE_CONFIG) {
     const last = [...atts].sort(compareSittings).pop();
     resolvedDeduction += sum(atts, 'creditHour') - last.creditHour;
   }
+  // AUTOMATIC NETTING. A retake that clears a subject removes the earlier
+  // failed attempt's grade points by itself — it must never depend on someone
+  // typing Removed GP. Historical and form/import-entered records carry that
+  // netting explicitly (a nonzero removedGradePoints or a resolves flag), and
+  // those are left exactly as they are. This covers the rest: a subject with
+  // several sittings where NOTHING is netted explicitly and the last one, in
+  // logical order, is a clean pass — most often because the earlier fail was
+  // imported without its needs-retake flag, so the retake found nothing to
+  // net when it was entered. Its failed sittings' grade points come off CGPA
+  // (Temporary) and their credit hours off the count, exactly as an explicit
+  // netting would. A subject with ANY explicit netting is skipped entirely, so
+  // nothing can ever be netted twice. Nothing in the original data qualifies
+  // (all 45 multi-attempt subjects are netted explicitly).
+  const autoNetById = {};
+  let autoRemovedGP = 0;
+  const scopeSet = new Set(gpaScope);
+  for (const atts of Object.values(attemptsBySubject)) {
+    if (atts.length < 2 || atts.some(isResolved)) continue;
+    const ordered = [...atts].sort(compareSittings);
+    const last = ordered[ordered.length - 1];
+    if (!scopeSet.has(last) || last.achievement === 'Fail' || last.needRetake === 1 || last.needRetake === true) continue;
+    const superseded = ordered.slice(0, -1).filter(r => scopeSet.has(r) && (r.achievement === 'Fail' || r.needRetake === 1 || r.needRetake === true));
+    if (!superseded.length) continue;
+    const gp = round2(sum(superseded, 'totalGradePoint'));
+    if (last.id != null) autoNetById[last.id] = gp;
+    autoRemovedGP += gp;
+    resolvedDeduction += sum(superseded, 'creditHour');
+  }
   const totalCumCt = sum(gpaScope, 'creditHour') - resolvedDeduction;
   const totalCumCtExclRepeat = sum(gpaScope.filter(countsTowardFinal), 'creditHour');
   const totalCumCtInclMPU = sum(records.filter(countsTowardFinal), 'creditHour');
@@ -1311,7 +1377,7 @@ function computeStudentSummary(records, config = ENGINE_CONFIG) {
   }
 
   const cgpaTemporary = totalCumCt
-    ? round2((totalCumGradePoint - sum(records, 'removedGradePoints')) / totalCumCt) : null;
+    ? round2((totalCumGradePoint - sum(records, 'removedGradePoints') - autoRemovedGP) / totalCumCt) : null;
   const cgpaFinal = totalCumCtExclRepeat
     ? round2(totalCumGradePointExclRepeat / totalCumCtExclRepeat) : null;
 
@@ -1381,7 +1447,7 @@ function computeStudentSummary(records, config = ENGINE_CONFIG) {
 
   return {
     totalCumGradePoint, totalCumGradePointExclRepeat, totalCumCt, totalCumCtExclRepeat,
-    totalCumCtInclMPU, gpaBySemester, creditHoursBySemester, gpaStatusById, cgpaTemporary, cgpaFinal, eligibility,
+    totalCumCtInclMPU, gpaBySemester, creditHoursBySemester, gpaStatusById, autoNetById, cgpaTemporary, cgpaFinal, eligibility,
     repeatCount, pendingRetakeSubjects, pendingResitSubjects, terminationTriggers, semesters,
   };
 }
@@ -2030,7 +2096,13 @@ function findPendingRetake(studentId, subjectCode, excludeId = null) {
   const code = String(subjectCode || '').trim().toUpperCase();
   if (!code) return null;
   const recs = getStudentRecords(studentId).filter(r => r.id !== excludeId);
-  const failedAttempts = recs.filter(r => r.subjectCode === code && (r.needRetake === 1 || r.needRetake === true));
+  // A failed attempt counts as pending whether or not it carries the
+  // needs-retake flag: a Fail-grade sitting that isn't a failed resit
+  // (stillFailing) or a row that resolves something. Without this, a first
+  // fail that was imported without the flag was invisible here, so the retake
+  // entered later found nothing to net (see findUnflaggedFailures).
+  const failedAttempts = recs.filter(r => r.subjectCode === code
+    && (r.needRetake === 1 || r.needRetake === true || (r.achievement === 'Fail' && !r.stillFailing && !isResolvingRecord(r))));
   // removedGradePoints lands on the LATER attempt that resolves a failure,
   // not on the failed row itself — so "resolved" means some row's
   // removedGradePoints matches this failed row's own totalGradePoint.
@@ -2074,18 +2146,30 @@ function getAttemptInfo(studentId, record) {
 // ---------------------------------------------------------------------------
 // 5. VIEW STATE + ROUTER
 // ---------------------------------------------------------------------------
-const state = { view: 'intake', batch: null, studentId: null };
+const state = { view: 'intake', batch: null, studentId: null, returnTo: null };
 
 function setView(view, extra = {}) {
+  // Where a student page's Back button goes. Reset on every student-page
+  // open unless the caller says otherwise, so it can't leak from an earlier
+  // visit (opened from the performance tab once, from the intake the next).
+  if (view === 'student' && !('returnTo' in extra)) extra = { ...extra, returnTo: null };
   Object.assign(state, { view }, extra);
   render();
 }
 
 function render() {
+  perfEntriesCache = null; // recomputed once per render, from the current records
   document.body.classList.toggle('role-admin', isAdmin());
   renderUndoButton();
   autoPromoteGraduates();
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  // The header's Export Excel / Export PDF are the CGPA exports (the PDF one is
+  // for the intake last viewed). On the performance tab they'd sit beside that
+  // tab's own Download buttons doing something different — so only the buttons
+  // that export what's on screen are shown there.
+  const inPerformance = currentSection() === 'performance';
+  document.getElementById('export-excel').style.display = inPerformance ? 'none' : '';
+  document.getElementById('export-pdf').style.display = inPerformance ? 'none' : '';
   renderTopTabs();
   renderIntakeTabs();
   renderConnectionPill();
@@ -2099,6 +2183,9 @@ function render() {
   } else if (state.view === 'audit') {
     document.getElementById('view-audit').classList.add('active');
     renderAuditView();
+  } else if (state.view === 'performance') {
+    document.getElementById('view-performance').classList.add('active');
+    renderPerformanceView();
   }
 }
 
@@ -2127,21 +2214,36 @@ function isBatchArchived(batch) {
 
 let showArchivedBatches = false; // resets each page load — a view toggle, not a saved preference
 
+// Which top-level section the current view belongs to. A student page keeps
+// the section it was opened from, so the tab you came from stays lit.
+function currentSection() {
+  if (state.view === 'audit') return 'audit';
+  if (state.view === 'performance' || (state.view === 'student' && state.returnTo === 'performance')) return 'performance';
+  return 'cgpa';
+}
+
 function renderTopTabs() {
   const wrap = document.getElementById('top-tabs');
-  const section = state.view === 'audit' ? 'audit' : 'cgpa';
+  const section = currentSection();
   wrap.innerHTML = `
     <button class="top-tab${section === 'cgpa' ? ' active' : ''}" data-section="cgpa">CGPA</button>
+    <button class="top-tab${section === 'performance' ? ' active' : ''}" data-section="performance">Student Performance Summary</button>
     <button class="top-tab${section === 'audit' ? ' active' : ''}" data-section="audit">Data Audit</button>`;
   wrap.querySelector('[data-section="cgpa"]').addEventListener('click', () => {
     if (section !== 'cgpa') setView('intake', { batch: state.batch });
+  });
+  wrap.querySelector('[data-section="performance"]').addEventListener('click', () => {
+    if (section !== 'performance') setView('performance');
   });
   wrap.querySelector('[data-section="audit"]').addEventListener('click', () => setView('audit'));
 }
 
 function renderIntakeTabs() {
   const wrap = document.getElementById('intake-tabs');
-  const section = state.view === 'audit' ? 'audit' : 'cgpa';
+  const section = currentSection();
+  // The second row belongs to the section: batch tabs under CGPA, the three
+  // list subtabs under Student Performance Summary.
+  if (section === 'performance') { renderPerformanceTabs(); return; }
   if (section !== 'cgpa') { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
   wrap.style.display = 'flex';
 
@@ -2366,7 +2468,9 @@ function renderStudentView() {
   const s = computeStudentSummary(records);
   studentPendingResit = new Set(s.pendingResitSubjects);
   studentGpaStatus = s.gpaStatusById;
+  studentAutoNet = s.autoNetById;
 
+  document.getElementById('back-to-intake').textContent = state.returnTo === 'performance' ? '\u2190 Back to performance summary' : '\u2190 Back to intake';
   document.getElementById('student-name').textContent = name;
   document.getElementById('student-meta').textContent = `${state.studentId} · ${batch}`;
 
@@ -2461,6 +2565,8 @@ let studentPendingResit = new Set();
 // Per-record "feeds the semester GPA?" status for the student on screen
 // (from computeStudentSummary's gpaStatusById), set by renderStudentView.
 let studentGpaStatus = {};
+// Per-record amount netted automatically (summary.autoNetById), same idea.
+let studentAutoNet = {};
 
 function gpaStatusCell(status) {
   if (status === 'resit') return '<span class="gpa-out" title="A later sitting of this subject in the same semester (a resit). Semester GPA follows the first attempt, so this row is left out of it.">No — resit</span>';
@@ -2516,16 +2622,6 @@ function renderRecordRow(r) {
   const afterText = attemptInfo.isResit
     ? ` — ${outcomeWord} after resit${keptNote}`
     : ` — ${outcomeWord} after ${attemptInfo.totalAttempts - 1} retake${keptNote}`;
-  // A pass that follows a failed attempt, with nothing netting that attempt
-  // out (no Removed GP / resolves flag anywhere on the subject): the subject
-  // is treated as cleared, but CGPA (Temporary) would count BOTH sittings.
-  const subjAttempts = attemptInfo.totalAttempts > 1 ? getSubjectAttempts(r.studentId, r.subjectCode) : [];
-  const unnetted = subjAttempts.length > 1 && attemptInfo.attemptNumber === attemptInfo.totalAttempts && !didFail && !isRetake
-    && subjAttempts.slice(0, -1).some(a => a.achievement === 'Fail' || a.needRetake === 1 || a.needRetake === true)
-    && !subjAttempts.some(isResolvingRecord);
-  const unnettedNote = unnetted
-    ? '<br><span style="color:var(--warn);font-size:0.72rem">⚠ passed after a failed attempt, but nothing nets that attempt out — CGPA (Temporary) counts both. Set Removed GP on this row.</span>'
-    : '';
   const isSevere = attemptInfo.failedCount > 3; // flagged regardless of whether it's since been resolved — a student who needed 4+ sittings to clear (or still hasn't) is worth surfacing either way
   // Red is reserved for the chronic (4+ failed attempts) flag specifically
   // — a Fail-achievement resit resolution on its own is a routine, expected
@@ -2537,12 +2633,12 @@ function renderRecordRow(r) {
     : '';
   return `<tr>
     <td>Sem ${r.semester}</td>
-    <td>${escapeHtml(r.subjectCode)}${wasRemapped ? `<br><span style="color:var(--muted);font-size:0.72rem">was ${escapeHtml(r.originalSubjectCode)}${r.originalCreditHour ? `, ${r.originalCreditHour} ct hr` : ''}</span>` : ''}${attemptNote}${unnettedNote}</td>
+    <td>${escapeHtml(r.subjectCode)}${wasRemapped ? `<br><span style="color:var(--muted);font-size:0.72rem">was ${escapeHtml(r.originalSubjectCode)}${r.originalCreditHour ? `, ${r.originalCreditHour} ct hr` : ''}</span>` : ''}${attemptNote}</td>
     <td>${r.creditHour}</td>
     <td>${r.marks}</td><td>${r.grade}${r.achievement ? `<br><span style="color:var(--muted);font-size:0.72rem">${r.achievement}</span>` : ''}</td><td>${r.gradePoint}</td><td>${r.totalGradePoint}</td>
     <td>${gpaStatusCell(studentGpaStatus[r.id])}</td>
     <td>${isRetake || r.stillFailing ? (studentPendingResit.has(r.subjectCode) ? 'Resit' : 'Yes') : '—'}</td>
-    <td>${round2(r.removedGradePoints || 0) ? round2(r.removedGradePoints) : '—'}</td>
+    <td>${round2(r.removedGradePoints || 0) ? round2(r.removedGradePoints) : (studentAutoNet[r.id] != null ? `<span title="Netted automatically: this sitting cleared the subject, so the earlier failed attempt's grade points no longer count toward CGPA (Temporary).">${studentAutoNet[r.id]} <span class="auto-tag">auto</span></span>` : '—')}</td>
     <td class="row-actions">${isAdmin() ? `
       <button class="btn small" data-edit="${r.id}">Edit</button>
       <button class="btn small danger" data-del="${r.id}">Remove</button>` : ''}
@@ -2635,8 +2731,39 @@ function wireRecordRowEvents() {
 // ---------------------------------------------------------------------------
 // 8. DATA AUDIT VIEW — a transparent changelog vs. the original workbook
 // ---------------------------------------------------------------------------
+// Failing results that were stored as NOT needing a retake: a Fail-band grade
+// with the flag off, that isn't a failed resit (stillFailing) or a row that
+// resolves something. This is the footprint of the PDF-import flaw fixed in
+// failsOutright above — such a subject never shows as pending. None exist in
+// the original data (every Fail-band record there is flagged).
+function findUnflaggedFailures() {
+  const all = getDerivedRecords();
+  const clearedByLaterPass = (r) => {
+    const last = all.filter(x => x.studentId === r.studentId && x.subjectCode === r.subjectCode).sort(compareSittings).pop();
+    return last && last !== r && last.achievement !== 'Fail' && !(last.needRetake === 1 || last.needRetake === true);
+  };
+  return all.filter(r => r.achievement === 'Fail'
+    && !(r.needRetake === 1 || r.needRetake === true)
+    && !r.stillFailing && !isResolvingRecord(r)
+    && !clearedByLaterPass(r));   // subject already passed on a later sitting: nothing is missing from the pending lists
+}
+
 function renderAuditView() {
-  document.getElementById('audit-list').innerHTML = `
+  const unflagged = findUnflaggedFailures();
+  const attentionHtml = unflagged.length ? `
+    <div class="audit-item open" id="unflagged-failures" style="border-color:var(--warn)">
+      <strong>${unflagged.length} failed result${unflagged.length === 1 ? '' : 's'} not marked as needing a retake</strong><span class="tag">Needs attention</span>
+      <p>These results are a Fail grade (below a C) but are stored as <em>not</em> needing a retake, so the
+      subject doesn't appear as pending resit/retake and doesn't hold the student back from being Eligible.
+      This is what an earlier PDF import did to a plain first-time fail. Marking them changes no grade or
+      points — it only puts the subject on the pending list, as a failed first sitting always is.</p>
+      <div class="table-wrap"><table class="data"><thead><tr><th>Student</th><th>Subject</th><th>Sem</th><th>Marks</th><th>Grade</th><th></th></tr></thead><tbody>
+      ${unflagged.map(r => `<tr><td>${escapeHtml(r.name)} (${escapeHtml(r.studentId)})</td><td>${escapeHtml(r.subjectCode)}</td><td>${r.semester}</td><td>${r.marks}</td><td>${r.grade}</td>
+        <td>${isAdmin() ? `<button class="btn small" data-mark-retake="${escapeHtml(r.id)}">Mark as needing retake</button>` : ''}</td></tr>`).join('')}
+      </tbody></table></div>
+      ${isAdmin() ? `<p style="margin-top:10px"><button class="btn small primary" id="mark-all-retake">Mark all ${unflagged.length} as needing retake</button></p>` : '<p class="note">An admin can mark these.</p>'}
+    </div>` : '';
+  document.getElementById('audit-list').innerHTML = attentionHtml + `
     <div class="audit-item">
       <strong>Settings now accepts Firebase's config exactly as copied</strong><span class="tag">Fixed</span>
       <p>Firebase Console shows the config as a JavaScript snippet, not JSON — unquoted keys, often still
@@ -2842,6 +2969,52 @@ function renderAuditView() {
       where the order was ambiguous.</p>
     </div>
     <div class="audit-item open">
+      <strong>New tab: Student Performance Summary</strong><span class="tag">Added</span>
+      <p>A new top-level tab with the President's List, Dean's List and Probation as three subtabs, each listing
+      the student's name, ID and semester GPA. It reads the very same semester GPAs and standing thresholds the
+      intake table highlights (President above 3.74, Dean above 3.49 and up to 3.74, both needing 12 credit hours;
+      Probation below 2.00), so the two can't disagree. Lists are grouped by <strong>calendar term</strong>
+      (January / June / October) because the same term is a different Sem N for each intake; a switch groups by
+      semester number instead. Also: filter by semester, intake and status (withdrawn hidden by default, graduates
+      kept so past semesters stay complete), search by name or ID, click a student to open their page and come back
+      to the same list, sortable columns, how many times a student has been on a list, how many consecutive
+      semesters a probation student has been below 2.00 (with a flag one semester before the termination trigger),
+      a note of students who had the GPA but fewer than 12 credit hours, and Excel / PDF downloads of the current
+      selection.</p>
+    </div>
+    <div class="audit-item open">
+      <strong>A retake now removes the earlier attempt's grade points automatically</strong><span class="tag">Fixed</span>
+      <p>Caught from a real case: a retake that passed (ENT2112, "attempt 2 of 2 — passed after 1 retake") carried
+      a warning that nothing netted the earlier failed attempt, asking for Removed GP to be typed in by hand.
+      It shouldn't need to be. Cause: the earlier fail had been imported without its needs-retake flag (see the
+      entry below), so when the retake was entered the system found no pending attempt to net, and stored the
+      retake with Removed GP 0. The warning I'd added just pointed at the gap instead of closing it.</p>
+      <p>Now it's closed in two places. <strong>In the calculation:</strong> when a subject has several sittings,
+      nothing on it is netted explicitly, and the last one (in logical order) is a clean pass, the earlier failed
+      sittings' grade points come off CGPA (Temporary) and their credit hours off the count, automatically — the
+      retake row shows the amount with an "auto" tag in the Removed GP column, and the Excel detail sheet has a
+      matching "Removed Grade Points (automatic)" column so it still adds up. This applies to existing data
+      straight away, with nothing to repair. A subject with any explicit Removed GP is never touched, so
+      nothing can be netted twice, and none of the original data is affected (all 45 multi-attempt subjects are
+      already netted explicitly). <strong>At entry:</strong> a failed attempt now counts as pending whether or not
+      it carries the flag, so a retake entered against it nets explicitly like any other. The warning is removed.</p>
+    </div>
+    <div class="audit-item open">
+      <strong>Fixed: a failed first sitting imported from a PDF wasn't marked as needing a retake</strong><span class="tag">Fixed</span>
+      <p>Caught from a real case: two Sem 1 results both showing C- (Fail), one with "Resit" in the Retake column
+      and the other with "—". Cause: the PDF importer set the needs-retake flag only when the PDF's grade differed
+      from the natural grade for the marks (a way to detect a <em>capped</em> result). A plain first-time 48 has the
+      same grade either way, so it was stored as not needing a retake — the subject never became pending, was
+      missing from the resit/retake lists, and wouldn't have held the student back from being Eligible. The
+      single-result form and bulk upload already did this correctly; the importer was the odd one out. In the
+      original data every failing record (84 of 84) is flagged and every passing one (652 of 652) is not, and the
+      importer now follows that: a fresh result below a C is stored as needing retake, and the import preview says
+      so. The resit path is untouched — resits are still handled by the existing resolve logic.</p>
+      <p>Results already imported with the flag missing are listed at the top of this page (only when there are
+      any) with a button to mark them, which can be undone. Marking changes no grade or points — it only puts the
+      subject on the pending list.</p>
+    </div>
+    <div class="audit-item open">
       <strong>PDF import: semester now follows the real January / June / October calendar</strong><span class="tag">Fixed</span>
       <p>The importer counted a semester as 3 calendar months, but the calendar has three terms a year with
       uneven gaps (Jan→Jun 5 months, Jun→Oct 4, Oct→Jan 3). It matched January 2026 for both intakes it was first
@@ -2871,9 +3044,8 @@ function renderAuditView() {
       resolving markers at all used to leave the subject on the pending-retake list even though the student's
       last sitting was a clean pass — the same "passed, then suddenly needs a resit" contradiction. A subject
       is now cleared when its last sitting, in logical order, is a pass. Zero real subjects were in this state,
-      so nothing existing changes. Because such a pass doesn't net out the earlier fail, the passing row now
-      shows a warning that CGPA (Temporary) counts both until Removed GP is set — so the gap is flagged rather
-      than hidden.</p>
+      so nothing existing changes. (The retake's grade points are now netted automatically too — see the entry
+      above — so the warning this entry used to describe is gone.)</p>
     </div>
     <div class="audit-item open">
       <strong>Subject table: an "In sem GPA" column and a GPA line per semester; long yet-to-take lists scroll</strong><span class="tag">Added</span>
@@ -3302,6 +3474,300 @@ function renderAuditView() {
       resolved. A handful of students will show a different (current, correct) number as a result.</p>
     </div>
   `;
+  wireUnflaggedFailures(unflagged);
+}
+
+function wireUnflaggedFailures(unflagged) {
+  const root = document.getElementById('unflagged-failures');
+  if (!root || !isAdmin()) return;
+  const markIds = async (ids) => {
+    const before = ids.map(id => Store.records.find(r => r.id === id)).filter(Boolean).map(r => ({ ...r }));
+    let done = 0;
+    for (const rec of before) {
+      try { await Store.updateRecord(rec.id, { needRetake: 1 }); done++; } catch (e) { console.error('Mark failed', e); }
+    }
+    if (done) {
+      setUndoableAction(`marked ${done} failed result${done === 1 ? '' : 's'} as needing retake`, async () => {
+        for (const rec of before) { const { id, ...fields } = rec; await Store.replaceRecord(id, fields); }
+      });
+    }
+    showToast(done === before.length ? `Marked ${done} result${done === 1 ? '' : 's'} as needing retake.` : `Marked ${done} of ${before.length} — check your connection and try the rest again.`, done !== before.length);
+    render();
+  };
+  root.querySelectorAll('[data-mark-retake]').forEach(btn => btn.addEventListener('click', () => markIds([btn.dataset.markRetake])));
+  const all = document.getElementById('mark-all-retake');
+  if (all) all.addEventListener('click', () => markIds(unflagged.map(r => r.id)));
+}
+
+// ---------------------------------------------------------------------------
+// 5c. STUDENT PERFORMANCE SUMMARY — President's / Dean's / Probation lists
+// ---------------------------------------------------------------------------
+// Everything here is read from computeStudentSummary + gpaStanding — the very
+// semester GPAs and standing thresholds the intake table highlights — so this
+// tab can never disagree with it. Nothing is stored.
+//
+// "Each semester": the calendar has three terms a year (January, June,
+// October), and the same term is a different "Sem N" for each intake (January
+// 2026 is Sem 5 for DBS2410 but Sem 4 for DBS2501). Lists are therefore grouped
+// by calendar term by default — one list per term across every intake, with
+// each student's intake and Sem shown — and can be switched to group by
+// semester number instead.
+
+const PERF_LISTS = {
+  president: { label: 'President\u2019s List', plain: "President's List", rule: 'Semester GPA above 3.74, with at least 12 credit hours counted.' },
+  dean: { label: 'Dean\u2019s List', plain: "Dean's List", rule: 'Semester GPA above 3.49 and up to 3.74, with at least 12 credit hours counted.' },
+  probation: { label: 'Probation', plain: 'Probation', rule: 'Semester GPA below 2.00 (no minimum credit hours). Three consecutive semesters below 2.00 is a termination trigger.' },
+};
+const PERF_LIST_ORDER = ['president', 'dean', 'probation'];
+const perfState = { list: 'president', group: 'term', pick: 'all', batch: 'all', status: 'current', search: '', sortKey: null, sortDir: 'asc' };
+let perfEntriesCache = null;
+
+// A batch code is DBS + YY + MM; its intake month is the start of its Sem 1.
+function batchStartTerm(batch) {
+  const m = String(batch || '').match(/(\d{2})(\d{2})$/);
+  if (!m) return null;
+  const month = Number(m[2]);
+  return month >= 1 && month <= 12 ? termNumber(2000 + Number(m[1]), month) : null;
+}
+function termLabel(n) { return ['January', 'June', 'October'][n % 3] + ' ' + Math.floor(n / 3); }
+function ordinal(n) { const s = ['th', 'st', 'nd', 'rd'], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); }
+
+// One entry per student per semester that has a GPA.
+function getPerformanceEntries() {
+  if (perfEntriesCache) return perfEntriesCache;
+  const entries = [];
+  for (const batch of getBatches()) {
+    const start = batchStartTerm(batch);
+    for (const st of getStudentsInBatch(batch)) {
+      const s = computeStudentSummary(st.records);
+      const times = { president: 0, dean: 0, probation: 0 };
+      let run = 0, lastLowSem = null; // same consecutive-semesters rule as the termination trigger
+      for (const sem of s.semesters) {
+        const gpa = s.gpaBySemester[sem], ct = s.creditHoursBySemester[sem];
+        if (gpa != null && gpa < 2.00) { run = (run > 0 && sem === lastLowSem + 1) ? run + 1 : 1; lastLowSem = sem; } else { run = 0; }
+        if (gpa == null) continue;
+        const standing = gpaStanding(gpa, ct);
+        if (standing) times[standing]++;
+        entries.push({
+          studentId: st.studentId, name: st.name, batch, status: st.status || 'active',
+          sem, gpa, ct, standing,
+          term: start == null ? null : start + sem - 1,
+          times: standing ? times[standing] : 0,
+          lowRun: standing === 'probation' ? run : 0,
+          // Would have qualified on GPA but fell short of 12 credit hours.
+          lowLoad: !standing && ct < 12 ? (gpa > 3.74 ? 'president' : gpa > 3.49 ? 'dean' : null) : null,
+        });
+      }
+    }
+  }
+  perfEntriesCache = entries;
+  return entries;
+}
+
+function perfStatusAllows(status) {
+  const st = status || 'active';
+  if (perfState.status === 'all') return true;
+  if (perfState.status === 'active') return st === 'active';
+  return st !== 'withdrawn'; // 'current': active + graduated — past semesters of graduates still belong in the lists
+}
+function perfBaseEntries() {
+  const q = perfState.search.trim().toLowerCase();
+  return getPerformanceEntries().filter(e =>
+    (perfState.batch === 'all' || e.batch === perfState.batch)
+    && perfStatusAllows(e.status)
+    && (!q || e.name.toLowerCase().includes(q) || e.studentId.toLowerCase().includes(q)));
+}
+function perfGroupKey(e) { return perfState.group === 'sem' ? String(e.sem) : (e.term == null ? 'unknown' : String(e.term)); }
+function perfGroupLabel(key) {
+  if (perfState.group === 'sem') return `Semester ${key}`;
+  return key === 'unknown' ? 'Unknown term' : termLabel(Number(key));
+}
+function perfGroupList(entries) {
+  const keys = [...new Set(entries.map(perfGroupKey))];
+  keys.sort((a, b) => {
+    if (a === 'unknown') return 1; if (b === 'unknown') return -1;
+    return perfState.group === 'sem' ? Number(a) - Number(b) : Number(b) - Number(a); // terms: latest first
+  });
+  return keys.map(k => ({ key: k, label: perfGroupLabel(k) }));
+}
+function perfSelection() {
+  const base = perfBaseEntries();
+  const groups = perfGroupList(base);
+  if (perfState.pick !== 'all' && !groups.some(g => g.key === perfState.pick)) perfState.pick = 'all';
+  const shown = perfState.pick === 'all' ? groups : groups.filter(g => g.key === perfState.pick);
+  const shownKeys = new Set(shown.map(g => g.key));
+  return { base, groups, shown, entries: base.filter(e => shownKeys.has(perfGroupKey(e))) };
+}
+
+function perfEffectiveSort() {
+  if (!perfState.sortKey) return { key: 'gpa', dir: perfState.list === 'probation' ? 1 : -1 }; // best first; probation: lowest first
+  return { key: perfState.sortKey, dir: perfState.sortDir === 'asc' ? 1 : -1 };
+}
+function perfSortRows(rows) {
+  const { key, dir } = perfEffectiveSort();
+  const val = { name: e => e.name, id: e => e.studentId, batch: e => e.batch, sem: e => e.sem, gpa: e => e.gpa };
+  return [...rows].sort((a, b) => {
+    const x = val[key](a), y = val[key](b);
+    const cmp = typeof x === 'number' ? x - y : String(x).localeCompare(String(y));
+    return dir * cmp || a.name.localeCompare(b.name);
+  });
+}
+function perfRowsFor(entries, list, key) { return perfSortRows(entries.filter(e => e.standing === list && perfGroupKey(e) === key)); }
+
+function perfTableHtml(rows, list) {
+  const sort = perfEffectiveSort();
+  const th = (k, text) => `<th class="sortable" data-perf-sort="${k}" title="Sort by ${text}">${text}${sort.key === k ? (sort.dir === 1 ? ' \u25B2' : ' \u25BC') : ''}</th>`;
+  const consecutive = (e) => e.lowRun >= 3 ? `${e.lowRun} <span class="pill warn">Termination trigger</span>`
+    : e.lowRun === 2 ? `2 <span class="pill warn">One more triggers termination</span>` : String(e.lowRun);
+  return `<table class="data"><thead><tr><th>#</th>${th('name', 'Student\u2019s Name')}${th('id', 'Student ID')}${th('batch', 'Intake')}${th('sem', 'Sem')}${th('gpa', 'GPA')}<th>Credit hrs</th><th>Times on this list</th>${list === 'probation' ? '<th>Consecutive sems below 2.00</th>' : ''}</tr></thead><tbody>
+    ${rows.map((e, i) => `<tr data-perf-student="${escapeHtml(e.studentId)}"><td>${i + 1}</td><td>${escapeHtml(e.name)}</td><td>${escapeHtml(e.studentId)}</td><td>${escapeHtml(e.batch)}</td><td>Sem ${e.sem}</td><td class="gpa-${e.standing}"><strong>${e.gpa.toFixed(2)}</strong></td><td>${e.ct}</td><td>${ordinal(e.times)}</td>${list === 'probation' ? `<td>${consecutive(e)}</td>` : ''}</tr>`).join('')}
+  </tbody></table>`;
+}
+
+function perfSectionHtml(group, entries, list) {
+  const rows = perfRowsFor(entries, list, group.key);
+  const lowLoad = entries.filter(e => e.lowLoad === list && perfGroupKey(e) === group.key);
+  const lowLoadHtml = lowLoad.length ? `<details class="perf-lowload"><summary>${lowLoad.length} more ${lowLoad.length === 1 ? 'student has' : 'students have'} the GPA for this list but fewer than 12 credit hours \u2014 not listed</summary><ul>${
+    lowLoad.map(e => `<li>${escapeHtml(e.name)} (${escapeHtml(e.studentId)}) \u2014 GPA ${e.gpa.toFixed(2)} over ${e.ct} credit hour${e.ct === 1 ? '' : 's'}</li>`).join('')}</ul></details>` : '';
+  return `<div class="perf-section"><h3>${escapeHtml(group.label)}<span class="perf-count">${rows.length} student${rows.length === 1 ? '' : 's'}</span></h3>${
+    rows.length ? `<div class="table-wrap">${perfTableHtml(rows, list)}</div>` : '<p class="perf-empty">No students on this list for this semester.</p>'}${lowLoadHtml}</div>`;
+}
+
+function renderPerformanceTabs() {
+  const wrap = document.getElementById('intake-tabs');
+  wrap.style.display = 'flex';
+  const { entries } = perfSelection();
+  wrap.innerHTML = PERF_LIST_ORDER.map(l => {
+    const n = entries.filter(e => e.standing === l).length;
+    return `<button class="intake-tab${perfState.list === l ? ' active' : ''}" data-perf-list="${l}">${PERF_LISTS[l].label} <span class="count">(${n})</span></button>`;
+  }).join('');
+  wrap.querySelectorAll('[data-perf-list]').forEach(btn => btn.addEventListener('click', () => {
+    perfState.list = btn.dataset.perfList; perfState.sortKey = null;
+    setView('performance');
+  }));
+}
+
+function perfControlsHtml() {
+  const batches = getBatches();
+  return `
+    <div class="field"><label for="perf-group">Group by</label><select id="perf-group">
+      <option value="term"${perfState.group === 'term' ? ' selected' : ''}>Calendar term (Jan / Jun / Oct)</option>
+      <option value="sem"${perfState.group === 'sem' ? ' selected' : ''}>Semester number</option></select></div>
+    <div class="field"><label for="perf-pick">Semester</label><select id="perf-pick"></select></div>
+    <div class="field"><label for="perf-batch">Intake</label><select id="perf-batch">
+      <option value="all">All intakes</option>${batches.map(b => `<option value="${escapeHtml(b)}"${perfState.batch === b ? ' selected' : ''}>${escapeHtml(b)}</option>`).join('')}</select></div>
+    <div class="field"><label for="perf-status">Show</label><select id="perf-status">
+      <option value="current"${perfState.status === 'current' ? ' selected' : ''}>Active &amp; graduated</option>
+      <option value="active"${perfState.status === 'active' ? ' selected' : ''}>Active only</option>
+      <option value="all"${perfState.status === 'all' ? ' selected' : ''}>All, incl. withdrawn</option></select></div>
+    <div class="field grow"><label for="perf-search">Search</label><input id="perf-search" type="search" placeholder="Name or student ID" value="${escapeHtml(perfState.search)}"></div>
+    <div class="perf-actions"><button class="btn small" id="perf-xlsx">Download Excel</button><button class="btn small" id="perf-pdf">Download PDF</button></div>`;
+}
+
+// Everything that depends on the filters but not on the controls themselves —
+// so typing in the search box doesn't rebuild (and lose focus in) the box.
+function refreshPerformance() {
+  const sel = perfSelection();
+  const pickEl = document.getElementById('perf-pick');
+  if (pickEl) {
+    pickEl.innerHTML = `<option value="all">All semesters</option>` + sel.groups.map(g => {
+      const n = sel.base.filter(e => perfGroupKey(e) === g.key && e.standing === perfState.list).length;
+      return `<option value="${g.key}"${perfState.pick === g.key ? ' selected' : ''}>${escapeHtml(g.label)} (${n})</option>`;
+    }).join('');
+  }
+  renderPerformanceTabs();
+
+  const count = (l) => sel.entries.filter(e => e.standing === l).length;
+  document.getElementById('perf-stats').innerHTML = `
+    <div class="stat-card"><div class="label">${perfState.pick === 'all' ? 'Semester results assessed' : 'Students assessed'}</div><div class="value">${sel.entries.length}</div></div>
+    ${PERF_LIST_ORDER.map(l => `<div class="stat-card"><div class="label">${PERF_LISTS[l].label}</div><div class="value">${count(l)}</div></div>`).join('')}`;
+  document.getElementById('perf-rule').textContent = `${PERF_LISTS[perfState.list].label}: ${PERF_LISTS[perfState.list].rule} A resit sitting doesn\u2019t change a semester\u2019s GPA, and MPU is left out for the batches that exclude it \u2014 the same figures the intake table shows.`;
+  document.getElementById('perf-sub').textContent = `${perfState.pick === 'all' ? 'All semesters' : perfGroupLabel(perfState.pick)} \u00B7 ${perfState.batch === 'all' ? 'all intakes' : perfState.batch}`;
+
+  const body = document.getElementById('perf-body');
+  body.innerHTML = !sel.entries.length
+    ? '<div class="empty-state">No students match these filters.</div>'
+    : sel.shown.map(g => perfSectionHtml(g, sel.entries, perfState.list)).join('');
+}
+
+function renderPerformanceView() {
+  document.getElementById('perf-controls').innerHTML = perfControlsHtml();
+  const on = (id, evt, fn) => document.getElementById(id).addEventListener(evt, fn);
+  on('perf-group', 'change', (e) => { perfState.group = e.target.value; perfState.pick = 'all'; render(); });
+  on('perf-pick', 'change', (e) => { perfState.pick = e.target.value; render(); });
+  on('perf-batch', 'change', (e) => { perfState.batch = e.target.value; render(); });
+  on('perf-status', 'change', (e) => { perfState.status = e.target.value; render(); });
+  on('perf-search', 'input', (e) => { perfState.search = e.target.value; refreshPerformance(); });
+  on('perf-xlsx', 'click', exportPerformanceExcel);
+  on('perf-pdf', 'click', exportPerformancePDF);
+  document.getElementById('perf-body').onclick = (ev) => {
+    const sortTh = ev.target.closest('[data-perf-sort]');
+    if (sortTh) {
+      const k = sortTh.dataset.perfSort, cur = perfEffectiveSort();
+      perfState.sortKey = k;
+      perfState.sortDir = cur.key === k ? (cur.dir === 1 ? 'desc' : 'asc') : (k === 'gpa' ? 'desc' : 'asc');
+      refreshPerformance(); return;
+    }
+    const tr = ev.target.closest('[data-perf-student]');
+    if (tr) setView('student', { studentId: tr.dataset.perfStudent, returnTo: 'performance' });
+  };
+  refreshPerformance();
+}
+
+// ---- exports: all three lists for the current selection and filters ----
+function perfExportData() {
+  const sel = perfSelection();
+  return PERF_LIST_ORDER.map(list => {
+    const rows = [];
+    for (const g of sel.shown) for (const e of perfRowsFor(sel.entries, list, g.key)) rows.push({ g, e });
+    return { list, rows };
+  });
+}
+function perfExportColumns(list) {
+  return ['Semester', 'Intake', 'Sem', "Student's Name", 'Student ID', 'GPA', 'Credit Hours', 'Times on this list'].concat(list === 'probation' ? ['Consecutive semesters below 2.00'] : []);
+}
+function perfExportRow({ g, e }, list) {
+  const row = { 'Semester': g.label, 'Intake': e.batch, 'Sem': e.sem, "Student's Name": e.name, 'Student ID': e.studentId, 'GPA': e.gpa, 'Credit Hours': e.ct, 'Times on this list': e.times };
+  if (list === 'probation') row['Consecutive semesters below 2.00'] = e.lowRun;
+  return row;
+}
+function perfFilterSummary() {
+  const status = { current: 'active & graduated students', active: 'active students only', all: 'all students incl. withdrawn' }[perfState.status];
+  return `${perfState.pick === 'all' ? 'All semesters' : perfGroupLabel(perfState.pick)} \u00B7 ${perfState.batch === 'all' ? 'all intakes' : perfState.batch} \u00B7 ${status}${perfState.search.trim() ? ` \u00B7 search "${perfState.search.trim()}"` : ''}`;
+}
+function perfFileStem() {
+  const sel = (perfState.pick === 'all' ? 'All-semesters' : perfGroupLabel(perfState.pick)).replace(/\s+/g, '-');
+  return `SoIM_Performance_${sel}_${perfState.batch === 'all' ? 'All-intakes' : perfState.batch}_${new Date().toISOString().slice(0, 10)}`;
+}
+function exportPerformanceExcel() {
+  if (typeof XLSX === 'undefined') { showToast('The Excel library didn\u2019t load \u2014 check your connection and try again.', true); return; }
+  const wb = XLSX.utils.book_new();
+  for (const { list, rows } of perfExportData()) {
+    const cols = perfExportColumns(list);
+    const ws = XLSX.utils.json_to_sheet(rows.map(r => perfExportRow(r, list)), { header: cols });
+    styleHeaderRow(ws, cols.length);
+    XLSX.utils.book_append_sheet(wb, ws, { president: 'President List', dean: 'Dean List', probation: 'Probation' }[list]);
+  }
+  XLSX.writeFile(wb, perfFileStem() + '.xlsx');
+}
+function exportPerformancePDF() {
+  if (!window.jspdf) { showToast('The PDF library didn\u2019t load \u2014 check your connection and try again.', true); return; }
+  const doc = new window.jspdf.jsPDF({ orientation: 'landscape' });
+  doc.setFontSize(14); doc.text('SoIM Student Performance Summary', 14, 15);
+  doc.setFontSize(9); doc.text(`${perfFilterSummary()} \u00B7 Generated ${new Date().toLocaleDateString()}`, 14, 21);
+  let y = 30;
+  for (const { list, rows } of perfExportData()) {
+    if (y > 165) { doc.addPage(); y = 20; }
+    doc.setFontSize(11); doc.text(`${PERF_LISTS[list].plain} (${rows.length})`, 14, y);
+    if (!rows.length) { doc.setFontSize(9); doc.text('No students on this list.', 14, y + 6); y += 16; continue; }
+    const cols = perfExportColumns(list);
+    doc.autoTable({
+      startY: y + 3, head: [cols], body: rows.map(r => { const o = perfExportRow(r, list); return cols.map(k => o[k]); }),
+      styles: { fontSize: 8 }, headStyles: { fillColor: [217, 234, 211], textColor: [28, 43, 69] },
+    });
+    y = (doc.lastAutoTable ? doc.lastAutoTable.finalY : y + 20) + 12;
+  }
+  doc.save(perfFileStem() + '.pdf');
 }
 
 // Validates a raw record's editable fields regardless of what the browser
@@ -3557,7 +4023,7 @@ document.addEventListener('DOMContentLoaded', () => {
     renderAddRecordPreview(buildSingleResultPlan(rec));
   });
 
-  document.getElementById('back-to-intake').addEventListener('click', () => setView('intake'));
+  document.getElementById('back-to-intake').addEventListener('click', () => setView(state.returnTo === 'performance' ? 'performance' : 'intake'));
   document.getElementById('status-filter').addEventListener('change', () => { selectedStudentIds.clear(); renderIntakeView(); });
 
   document.getElementById('bulk-status-clear').addEventListener('click', () => { selectedStudentIds.clear(); renderIntakeView(); });
@@ -4463,6 +4929,19 @@ function buildPdfResultsPlan(header) {
 // Builds the actual record to write for one preview item, given whatever
 // action is currently selected for it (may differ from the item's default —
 // the admin can change it in the preview before confirming).
+// A result below a C (C-, D, F, E — or a barred 0) is a failure. Stored as
+// "needs retake", exactly as the single-result form (updateRetakeHint) and
+// bulk upload already do, and as every one of the 84 failing records in the
+// original data is (84 of 84; every passing record is 0, 652 of 652). The
+// PDF importer used to set the flag only when the PDF's grade differed from
+// the natural grade — i.e. only to detect a CAPPED result — so a plain first
+// sitting of, say, 48 marks (natural grade C-, equal to the PDF's) was stored
+// as NOT needing a retake: no "Resit"/"Yes" in the Retake column, absent from
+// the pending lists, not blocking eligibility.
+function failsOutright(marks) {
+  return gradeToPoint(markToGrade(marks, false, GRADING_TABLE_JUN2026), GRADING_TABLE_JUN2026) < 2.0;
+}
+
 function buildPdfRecord(header, item) {
   const creditHour = creditHourFromSubjectCode(header.subjectCode);
   const base = {
@@ -4500,10 +4979,14 @@ function buildPdfRecord(header, item) {
       }
       if (item.needRetake === 0) base.resolvesPriorAttempt = true;
     } else {
+      // Resit marker (or choice) but nothing pending on file to resolve —
+      // nothing to net, so it's a fresh result like any other.
       base.removedGradePoints = 0;
+      if (failsOutright(base.marks)) base.needRetake = 1;
     }
   } else {
     base.removedGradePoints = 0;
+    if (failsOutright(base.marks)) base.needRetake = 1;
   }
   return base;
 }
@@ -4540,7 +5023,7 @@ function renderPdfImportPreview(header, plan) {
     const notesHtml = [semesterNote, contextNote].filter(Boolean).map(n => `<br><span${alertStyle}>${n}</span>`).join('');
     return `<div class="mapping-row" data-pdf-row="${i}">
       <span style="min-width:150px">${escapeHtml(item.row.name)} (${item.row.studentId})</span>
-      <span class="credit-note">Sem ${item.semester} · marks ${item.row.marks}, ${gradeDisplay}${item.needRetake ? ' — capped' : ''}${notesHtml}</span>
+      <span class="credit-note">Sem ${item.semester} · marks ${item.row.marks}, ${gradeDisplay}${item.needRetake ? ' — capped' : ''}${(!item.pendingPrior && failsOutright(item.row.marks)) ? ' — below a C, will be marked as needing retake' : ''}${notesHtml}</span>
       <select class="pdf-action-select" data-idx="${i}" style="margin-left:auto;font-size:0.78rem;padding:3px 6px">${options}</select>
       <label style="font-size:0.76rem;color:var(--muted)">Sem
         <input type="number" class="pdf-sem-input" data-idx="${i}" value="${item.semester}" min="1" max="7" style="width:44px;padding:3px 5px;margin-left:4px">
@@ -4674,17 +5157,21 @@ function exportExcel() {
     XLSX.utils.book_append_sheet(wb, ws, batch);
 
     // Detail sheet
-    const detailRows = students.flatMap(s => s.records.map(r => {
+    const detailRows = students.flatMap(s => { const autoNet = computeStudentSummary(s.records).autoNetById; return s.records.map(r => {
       const attempt = getAttemptInfo(r.studentId, r);
       return {
         "Student's Name": r.name, 'Student ID': r.studentId, 'Required to Retake': r.needRetake,
-        'Removed Grade Points': r.removedGradePoints, 'Sem': r.semester, 'Subject Code': r.subjectCode,
+        'Removed Grade Points': r.removedGradePoints,
+        // Netted by the system when a retake cleared the subject and nothing
+        // was entered by hand — so this sheet still adds up to CGPA (Temporary).
+        'Removed Grade Points (automatic)': autoNet[r.id] != null ? autoNet[r.id] : '',
+        'Sem': r.semester, 'Subject Code': r.subjectCode,
         'Ct Hr': r.creditHour, 'Grade': r.grade, 'Total Grade Point': r.totalGradePoint,
         'Attempt': attempt.totalAttempts > 1 ? `${attempt.attemptNumber} of ${attempt.totalAttempts}` : '',
         'Originally Entered As': (r.originalSubjectCode !== r.subjectCode || r.originalCreditHour !== r.creditHour)
           ? `${r.originalSubjectCode}${r.originalCreditHour ? ` (${r.originalCreditHour} ct hr)` : ''}` : '',
       };
-    }));
+    }); });
     const wsDetail = XLSX.utils.json_to_sheet(detailRows);
     XLSX.utils.book_append_sheet(wb, wsDetail, (batch + '_Detail').slice(0, 31));
   }
