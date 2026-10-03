@@ -1173,6 +1173,26 @@ function sum(records, field) {
   return records.reduce((acc, r) => acc + (Number(r[field]) || 0), 0);
 }
 
+// A removed-points figure only counts as real if it survives rounding to 2
+// decimals. A leftover floating-point residual (e.g. 1e-7 from a spreadsheet
+// formula) is truthy in JavaScript but means nothing — treating it as a
+// "resolving" marker made a FAILING sitting look like it had resolved
+// something, and the order of two same-semester sittings then fell back to
+// whatever order they happened to be stored in.
+function hasRemovedPoints(r) { return Math.abs(Number(r.removedGradePoints) || 0) >= 0.005; }
+function isResolvingRecord(r) { return hasRemovedPoints(r) || r.resolvesPriorAttempt === true; }
+
+// Logical order of sittings of the same subject within one semester,
+// independent of how the rows happen to be stored or which bookkeeping
+// flags they carry. A failing sitting always comes BEFORE a passing one — a
+// pass can't be followed by a resit — and within each, a record that
+// resolves/nets another comes after the one it acts on.
+function sittingOrder(r) {
+  const failing = r.needRetake === 1 || r.needRetake === true || r.achievement === 'Fail';
+  return (failing ? 0 : 2) + (isResolvingRecord(r) ? 1 : 0);
+}
+function compareSittings(a, b) { return a.semester - b.semester || sittingOrder(a) - sittingOrder(b); }
+
 function deriveRecord(raw) {
   const gradingTable = gradingTableFor(raw.gradingVersion);
   const grade = markToGrade(raw.marks, raw.needRetake === 1 || raw.needRetake === true, gradingTable);
@@ -1184,6 +1204,9 @@ function deriveRecord(raw) {
   const totalGradePoint = round2(gradePoint * creditHour);
   return {
     ...raw,
+    // residuals like 1e-7 are normalised to 0 here, so nothing downstream
+    // (sums, resolved checks, exports) ever sees them
+    removedGradePoints: (raw.removedGradePoints && Math.abs(raw.removedGradePoints) < 0.005) ? 0 : raw.removedGradePoints,
     subjectCode,
     originalSubjectCode: raw.subjectCode,
     creditHour,
@@ -1200,7 +1223,7 @@ function computeStudentSummary(records, config = ENGINE_CONFIG) {
   // (see findPendingRetake) — needed because a failed attempt can genuinely
   // score 0 total grade points, and "removedGradePoints is nonzero" alone
   // can't tell "resolved, cancelling out a zero" apart from "never touched".
-  const isResolved = (r) => (r.removedGradePoints && r.removedGradePoints !== 0) || r.resolvesPriorAttempt === true;
+  const isResolved = isResolvingRecord;
   // Whether a record's points count toward CGPA Final — based on the grade
   // actually achieved, not on the stored needRetake flag. Those sound like
   // they'd always agree, but they answer different questions: needRetake
@@ -1242,7 +1265,7 @@ function computeStudentSummary(records, config = ENGINE_CONFIG) {
   for (const r of records) (attemptsBySubject[r.subjectCode] = attemptsBySubject[r.subjectCode] || []).push(r);
   for (const atts of Object.values(attemptsBySubject)) {
     if (!atts.some(isResolved)) continue;
-    const last = [...atts].sort((a, b) => a.semester - b.semester || (isResolved(a) ? 1 : 0) - (isResolved(b) ? 1 : 0)).pop();
+    const last = [...atts].sort(compareSittings).pop();
     resolvedDeduction += sum(atts, 'creditHour') - last.creditHour;
   }
   const totalCumCt = sum(gpaScope, 'creditHour') - resolvedDeduction;
@@ -1262,7 +1285,7 @@ function computeStudentSummary(records, config = ENGINE_CONFIG) {
   const resitSittings = new Set();
   for (const g of Object.values(sittingGroups)) {
     if (g.length < 2) continue;
-    [...g].sort((a, b) => (isResolved(a) ? 1 : 0) - (isResolved(b) ? 1 : 0)).slice(1).forEach(r => resitSittings.add(r));
+    [...g].sort((a, b) => sittingOrder(a) - sittingOrder(b)).slice(1).forEach(r => resitSittings.add(r));
   }
 
   // Which records feed a semester's GPA, for the subject table's "In sem
@@ -1297,6 +1320,17 @@ function computeStudentSummary(records, config = ENGINE_CONFIG) {
   // still failed (stillFailing — only ever set on newly entered records, so
   // every historical case is unchanged).
   const resolvedSubjects = new Set(records.filter(r => isResolved(r) && !r.stillFailing).map(r => r.subjectCode));
+  // A subject whose LAST sitting (in logical order) is a clean pass is
+  // cleared too, even when nothing on those rows carries a resolving marker.
+  // Otherwise a student who has plainly passed would stay on the pending
+  // list just because a failed sitting of the same subject sits alongside it
+  // — "passed, and then suddenly needs a resit". (Zero such cases in the
+  // real data; the row shows a warning when the failed attempt isn't netted
+  // out, see renderRecordRow, so this can't hide a data gap.)
+  for (const [code, atts] of Object.entries(attemptsBySubject)) {
+    const last = [...atts].sort(compareSittings).pop();
+    if (last.achievement !== 'Fail' && !(last.needRetake === 1 || last.needRetake === true)) resolvedSubjects.add(code);
+  }
   const unresolvedSubjects = [...needingRetake].filter(s => !resolvedSubjects.has(s));
 
   // Resit and retake are different things and were wrongly lumped into one
@@ -1312,8 +1346,7 @@ function computeStudentSummary(records, config = ENGINE_CONFIG) {
   const pendingResitSubjects = [];
   const pendingRetakeSubjects = [];
   for (const subject of unresolvedSubjects) {
-    const attempts = records.filter(r => r.subjectCode === subject)
-      .sort((a, b) => a.semester - b.semester || (isResolved(a) ? 1 : 0) - (isResolved(b) ? 1 : 0));
+    const attempts = records.filter(r => r.subjectCode === subject).sort(compareSittings);
     const pendingRec = [...attempts].reverse().find(r => r.needRetake === 1 || r.needRetake === true);
     const awaitingResit = attempts.length === 1 && pendingRec.grade === 'C-' && lastSemester <= pendingRec.semester;
     (awaitingResit ? pendingResitSubjects : pendingRetakeSubjects).push(subject);
@@ -2001,7 +2034,7 @@ function findPendingRetake(studentId, subjectCode, excludeId = null) {
   // removedGradePoints lands on the LATER attempt that resolves a failure,
   // not on the failed row itself — so "resolved" means some row's
   // removedGradePoints matches this failed row's own totalGradePoint.
-  const resolvedAmounts = recs.filter(r => r.subjectCode === code && r.removedGradePoints && r.removedGradePoints !== 0 && !r.stillFailing).map(r => r.removedGradePoints);
+  const resolvedAmounts = recs.filter(r => r.subjectCode === code && hasRemovedPoints(r) && !r.stillFailing).map(r => r.removedGradePoints);
   return failedAttempts.find(f => !resolvedAmounts.some(amt => Math.abs(amt - f.totalGradePoint) < 0.005)) || null;
 }
 
@@ -2014,28 +2047,16 @@ function findPendingRetake(studentId, subjectCode, excludeId = null) {
 // keep the order they were entered in, since nothing finer-grained than
 // that is tracked.
 function getSubjectAttempts(studentId, subjectCode) {
-  // A real bug lived here: sorting only by semester leaves same-semester
-  // attempts (a resit) in whatever arbitrary order they happen to sit in
-  // storage — which for Firestore is not guaranteed to be insertion order
-  // at all. Confirmed directly against a real case where this put the
-  // RESOLVING attempt before the one it resolves, mislabeling "attempt 2
-  // of 3" as the clean pass and "attempt 3 of 3" as if it were still
-  // pending — backwards from what actually happened, and why that pending
-  // subject was correctly absent from "Subjects pending retake" (the
-  // underlying resolution logic isn't order-dependent) while still
-  // displaying as if it were still outstanding.
-  // Fixed with a same-semester tiebreaker: an attempt that resolves
-  // another (removedGradePoints set, or resolvesPriorAttempt flagged)
-  // is, by definition, the later of the two — sort it after.
-  const isResolving = (r) => (r.removedGradePoints && r.removedGradePoints !== 0) || r.resolvesPriorAttempt === true;
+  // Ordered by semester, then by the logical order of sittings within a
+  // semester (see sittingOrder) — never by storage order or by which
+  // bookkeeping flags a row happens to carry. Earlier versions sorted
+  // same-semester sittings by "does it carry a resolving marker", which
+  // broke down when both rows looked alike (a leftover 1e-7 on the failing
+  // row): the order then depended on how they were stored, and a pass could
+  // be labelled the earlier attempt with the fail as its "resit".
   return getStudentRecords(studentId)
     .filter(r => r.subjectCode === subjectCode)
-    .sort((a, b) => {
-      if (a.semester !== b.semester) return a.semester - b.semester;
-      const aResolving = isResolving(a), bResolving = isResolving(b);
-      if (aResolving !== bResolving) return aResolving ? 1 : -1;
-      return 0;
-    });
+    .sort(compareSittings);
 }
 
 function getAttemptInfo(studentId, record) {
@@ -2339,7 +2360,7 @@ function updateBulkStatusBar() {
 // 7. STUDENT DETAIL VIEW
 // ---------------------------------------------------------------------------
 function renderStudentView() {
-  const records = getStudentRecords(state.studentId).sort((a, b) => a.semester - b.semester || a.subjectCode.localeCompare(b.subjectCode));
+  const records = getStudentRecords(state.studentId).sort((a, b) => a.semester - b.semester || a.subjectCode.localeCompare(b.subjectCode) || sittingOrder(a) - sittingOrder(b));
   if (!records.length) { setView('intake'); return; }
   const { name, batch } = records[0];
   const s = computeStudentSummary(records);
@@ -2495,6 +2516,16 @@ function renderRecordRow(r) {
   const afterText = attemptInfo.isResit
     ? ` — ${outcomeWord} after resit${keptNote}`
     : ` — ${outcomeWord} after ${attemptInfo.totalAttempts - 1} retake${keptNote}`;
+  // A pass that follows a failed attempt, with nothing netting that attempt
+  // out (no Removed GP / resolves flag anywhere on the subject): the subject
+  // is treated as cleared, but CGPA (Temporary) would count BOTH sittings.
+  const subjAttempts = attemptInfo.totalAttempts > 1 ? getSubjectAttempts(r.studentId, r.subjectCode) : [];
+  const unnetted = subjAttempts.length > 1 && attemptInfo.attemptNumber === attemptInfo.totalAttempts && !didFail && !isRetake
+    && subjAttempts.slice(0, -1).some(a => a.achievement === 'Fail' || a.needRetake === 1 || a.needRetake === true)
+    && !subjAttempts.some(isResolvingRecord);
+  const unnettedNote = unnetted
+    ? '<br><span style="color:var(--warn);font-size:0.72rem">⚠ passed after a failed attempt, but nothing nets that attempt out — CGPA (Temporary) counts both. Set Removed GP on this row.</span>'
+    : '';
   const isSevere = attemptInfo.failedCount > 3; // flagged regardless of whether it's since been resolved — a student who needed 4+ sittings to clear (or still hasn't) is worth surfacing either way
   // Red is reserved for the chronic (4+ failed attempts) flag specifically
   // — a Fail-achievement resit resolution on its own is a routine, expected
@@ -2506,7 +2537,7 @@ function renderRecordRow(r) {
     : '';
   return `<tr>
     <td>Sem ${r.semester}</td>
-    <td>${escapeHtml(r.subjectCode)}${wasRemapped ? `<br><span style="color:var(--muted);font-size:0.72rem">was ${escapeHtml(r.originalSubjectCode)}${r.originalCreditHour ? `, ${r.originalCreditHour} ct hr` : ''}</span>` : ''}${attemptNote}</td>
+    <td>${escapeHtml(r.subjectCode)}${wasRemapped ? `<br><span style="color:var(--muted);font-size:0.72rem">was ${escapeHtml(r.originalSubjectCode)}${r.originalCreditHour ? `, ${r.originalCreditHour} ct hr` : ''}</span>` : ''}${attemptNote}${unnettedNote}</td>
     <td>${r.creditHour}</td>
     <td>${r.marks}</td><td>${r.grade}${r.achievement ? `<br><span style="color:var(--muted);font-size:0.72rem">${r.achievement}</span>` : ''}</td><td>${r.gradePoint}</td><td>${r.totalGradePoint}</td>
     <td>${gpaStatusCell(studentGpaStatus[r.id])}</td>
@@ -2789,6 +2820,60 @@ function renderAuditView() {
       them at once — no need to open each student's page individually anymore, though that still works too
       for one at a time. Selection clears when you switch intake or change the status filter, so it can't
       silently carry over to a different set of students than you were looking at.</p>
+    </div>
+    <div class="audit-item open">
+      <strong>Fixed: a pass could be treated as the first attempt and the fail as its "resit"</strong><span class="tag">Fixed</span>
+      <p>Caught from a real case: two same-semester sittings of one subject showed the 50-mark <em>pass</em> as
+      attempt 2 (counted in the semester GPA) and the 48-mark <em>fail</em> as attempt 3 (excluded as the
+      "resit") — backwards, since a pass can't be followed by a resit. Reproduced exactly first: the order of
+      two same-semester sittings was decided only by bookkeeping — whether a row carries removed grade points
+      or a "resolves" flag — and when <em>both</em> rows looked alike (the failing row had a leftover
+      floating-point residual, 1e-7, the same one seen on that row earlier; a stray flag does the same) it
+      fell back to whatever order the rows happened to be stored in. That put the semester GPA at 2.00
+      instead of 1.67. CGPA was never affected.</p>
+      <p>The order is now decided by what is logical, not by flags or storage: <strong>a failing sitting always
+      comes before a passing one</strong>, and within each, a record that nets/resolves another comes after the
+      one it acts on. This one rule drives the attempt numbers, which sitting counts for the semester GPA, the
+      resit/retake classification, the credit-hour deduction and the order the rows are displayed in. Leftover
+      residuals below 0.005 are also now ignored everywhere (they stay in the database untouched; they're just
+      never read as real). Verified against all four storage variants (residual, stray flag, fail-first, pass-first
+      — all now give the same result) and against all 38 real students: attempt labels, GPA statuses, semester
+      GPAs, resit/retake lists, CGPA and credit hours are unchanged for every one — the fix only alters cases
+      where the order was ambiguous.</p>
+    </div>
+    <div class="audit-item open">
+      <strong>PDF import: semester now follows the real January / June / October calendar</strong><span class="tag">Fixed</span>
+      <p>The importer counted a semester as 3 calendar months, but the calendar has three terms a year with
+      uneven gaps (Jan→Jun 5 months, Jun→Oct 4, Oct→Jan 3). It matched January 2026 for both intakes it was first
+      checked against, which hid the problem, then drifted: DBS2410 (October intake) came out as Sem 7 in June
+      2026 instead of Sem 6, and DBS2501 as Sem 6 instead of Sem 5. A batch's intake term is now its Sem 1 and
+      each term after it adds one (DBS2410: Oct 2024 = 1 … Jan 2026 = 5, Jun 2026 = 6, Oct 2026 = 7). Checked
+      two ways: by counting terms one at a time for every intake (0 mismatches, where the old formula was wrong
+      on 37 of 135 pairs), and against the existing data — at January 2026 the calendar gives each batch's
+      latest semester on file for all 8 batches, the old formula for only 5. <strong>January 2026 itself
+      changes for three intakes:</strong> DBS2401 (old 8, now 7), DBS2406 (old 7, now 6) and DBS2510 (old 1, now
+      2 — the old answer collided with its real Sem 1). DBS2410 and DBS2501 are unchanged for January 2026.
+      Anything imported earlier from a January 2026 PDF for those three intakes was numbered by the old rule
+      and is worth a look; nothing is changed automatically.</p>
+    </div>
+    <div class="audit-item open">
+      <strong>PDF import: a missing Total FE column no longer stops the import</strong><span class="tag">Fixed</span>
+      <p>The importer insisted on a "Total FE" column in the table header and on an FE value in every row, so a
+      PDF without that column was rejected with "Could not find the table header row" before any row was read.
+      Total FE is now optional in both the header and the rows, and a missing one is treated as 0 (shown as
+      "—"), as if the column were there and empty. Also: if the CMS repeats the header on every page, rows from
+      page 2 onward are now read (before, only the first page's rows were), and the error message now quotes the
+      text it found where the header should be, so an unexpected layout can be diagnosed from the message alone.</p>
+    </div>
+    <div class="audit-item open">
+      <strong>A subject whose last sitting is a clean pass no longer stays on the pending list</strong><span class="tag">Fixed</span>
+      <p>Follow-on to the ordering fix above. A pass and a fail of the same subject carrying <em>no</em>
+      resolving markers at all used to leave the subject on the pending-retake list even though the student's
+      last sitting was a clean pass — the same "passed, then suddenly needs a resit" contradiction. A subject
+      is now cleared when its last sitting, in logical order, is a pass. Zero real subjects were in this state,
+      so nothing existing changes. Because such a pass doesn't net out the earlier fail, the passing row now
+      shows a warning that CGPA (Temporary) counts both until Removed GP is set — so the gap is flagged rather
+      than hidden.</p>
     </div>
     <div class="audit-item open">
       <strong>Subject table: an "In sem GPA" column and a GPA line per semester; long yet-to-take lists scroll</strong><span class="tag">Added</span>
@@ -4133,13 +4218,35 @@ function parseResultSummaryPDF(rawText) {
   if (!headerMatch) throw new Error('Could not find the exam period / subject header line (expected something like "January 2026 - FFI2213 - Fundamentals of Finance - DBS (Lecturer Name)").');
   const [, examPeriod, subjectCode, subjectName, program, lecturer] = headerMatch;
 
-  const afterHeaderRow = text.split(/Number\s+Student Name\s+Exam Status\s+Total CW\s+Total FE\s+Total Marks\s+Grade\s+Grade Point\s+Attempt/i)[1];
-  if (!afterHeaderRow) throw new Error('Could not find the table header row (expected "Student Name / Exam Status / Total CW / Total FE / Total Marks / Grade / Grade Point / Attempt"). Is this a "Student Result Summary" export?');
+  // The table header. Total FE is OPTIONAL: the CMS leaves that column out
+  // altogether for a subject with no final exam, and a header that insists on
+  // it rejects the whole file before reading a single row. A missing Total FE
+  // is simply treated as 0 (see the row parser below), exactly as if the
+  // column were there with nothing in it. Exam Status / Total CW are tolerated
+  // as optional too, and the "Number" of "Student Number" is not required.
+  // Last resort: the two final column labels, which are on every variant.
+  // Split on EVERY occurrence of the header and keep everything after the
+  // first one — when the CMS repeats the header on each page, taking only
+  // the text up to the second header (as this used to) would silently drop
+  // every row from page 2 onward.
+  const HEADER_PATTERNS = [
+    /Student\s+Name\s+(?:Exam\s+Status\s+)?(?:Total\s+CW\s+)?(?:Total\s+FE\s+)?Total\s+Marks\s+Grade\s+Grade\s+Point\s+Attempt/i,
+    /Grade\s+Point\s+Attempt/i,
+  ];
+  let afterHeaderRow = null;
+  for (const pattern of HEADER_PATTERNS) {
+    const parts = text.split(new RegExp(pattern.source, 'ig'));
+    if (parts.length > 1) { afterHeaderRow = parts.slice(1).join(' '); break; }
+  }
+  if (!afterHeaderRow) {
+    const near = (text.match(/.{0,60}Student\s+Name.{0,160}/i) || [text.slice(headerMatch.index + headerMatch[0].length, headerMatch.index + headerMatch[0].length + 220)])[0].trim();
+    throw new Error(`Could not find the table header row (expected the columns Student Name / Exam Status / Total CW / Total FE / Total Marks / Grade / Grade Point / Attempt — Total FE may be missing). Is this a "Student Result Summary" export? Text found where the header should be: "${near}"`);
+  }
 
   const KNOWN_STATUSES = ['ABSENT', 'BARRED', 'DEFERRED', 'WITHDRAWN', 'EXEMPTED', 'INCOMPLETE'];
   const STUDENT_NUMBER_RE = /\b([A-Z]{2,5}\d{4,8})\b/g;
 
-  const anchors = [...afterHeaderRow.matchAll(STUDENT_NUMBER_RE)];
+  const anchors = [...afterHeaderRow.matchAll(STUDENT_NUMBER_RE)].filter(m => m[1] !== subjectCode);
   const rows = [];
   const errors = [];
 
@@ -4159,7 +4266,11 @@ function parseResultSummaryPDF(rawText) {
     // Total FE accepts a non-numeric placeholder (e.g. "-") alongside a
     // real number — some rows genuinely have no final-exam component to
     // report (e.g. a barred sitting), as opposed to a real 0.0.
-    const tailMatch = chunk.match(/(\d+\.\d+)\s+(\d+\.\d+|-)\s+(\d+)\s+(\*)?([A-F][+-]?|BR)\s+(\d+\.\d+)\s+(\d+)/);
+    // The Total FE group is optional as a whole: with the column absent a row
+    // reads "CW  Total  Grade  GP  Attempt", and the Total Marks integer is
+    // not mistaken for an FE value because FE must have a decimal point (or
+    // be a "-" placeholder).
+    const tailMatch = chunk.match(/(\d+\.\d+)\s+(?:(\d+\.\d+|-)\s+)?(\d+)\s+(\*)?([A-F][+-]?|BR)\s+(\d+\.\d+)\s+(\d+)/);
     if (!tailMatch) {
       errors.push(`Could not read the result fields for ${studentId} — raw text: "${chunk}"`);
       continue;
@@ -4181,12 +4292,12 @@ function parseResultSummaryPDF(rawText) {
       name: namePart,
       examStatus,
       totalCW: Number(totalCW),
-      // null (not 0) when the PDF shows a placeholder rather than a real
-      // number — kept distinct through to display ("—") rather than
+      // null (not 0) when the PDF shows a placeholder — or has no Total FE
+      // column at all — rather than a real number — kept distinct through to display ("—") rather than
       // silently becoming a real-looking 0.0; still treated as 0 for any
       // calculation that touches it, since there's nothing else sensible
       // to use.
-      totalFE: totalFE === '-' ? null : Number(totalFE),
+      totalFE: (totalFE === undefined || totalFE === '-') ? null : Number(totalFE),
       // Barred: marks forced to 0 regardless of whatever Total Marks the
       // PDF shows — that figure is meaningless for a sitting that didn't
       // happen, and 0 marks naturally computes to the lowest grade band
@@ -4206,30 +4317,33 @@ function parseResultSummaryPDF(rawText) {
 
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
 
-// A batch's own start month is when it began semester 1; each semester is a
-// 3-calendar-month block, with the exam falling in the month right after
-// that block ends. Validated against 7 real (batch, exam period) -> semester
-// pairs across two different intakes sitting the same exam period — see the
-// note at the top of this section.
+// The academic calendar has THREE terms a year — January, June and October
+// — so the gaps between them are uneven (Jan→Jun 5 months, Jun→Oct 4,
+// Oct→Jan 3). A batch's own intake term is its Semester 1, and every term
+// after it adds one: DBS2410 (October 2024) is Sem 1 in Oct 2024, Sem 2 in
+// Jan 2025, Sem 3 in Jun 2025, Sem 4 in Oct 2025, Sem 5 in Jan 2026, Sem 6 in
+// Jun 2026, Sem 7 in Oct 2026. The exam period printed on the PDF (e.g.
+// "June 2026") names the TERM. An earlier version counted 3-month blocks
+// (ceil(elapsed months / 3)) — which agrees with the calendar only by
+// coincidence for some term pairs (it happened to match January 2026 for
+// both intakes it was first checked against) and drifts by a semester
+// otherwise: it put DBS2410 at Sem 7 in June 2026 instead of Sem 6.
+// A month that isn't itself a term start falls in the term it belongs to
+// (Feb–May → January, Jul–Sep → June, Nov–Dec → October).
+function termNumber(year, month) {
+  const termInYear = month <= 5 ? 0 : month <= 9 ? 1 : 2;
+  return year * 3 + termInYear;
+}
 function deriveSemesterFromBatchAndPeriod(batch, examPeriod) {
   const bm = String(batch).match(/(\d{2})(\d{2})$/);
   const [monthName, yearStr] = String(examPeriod).trim().split(/\s+/);
   const examMonthIdx = MONTH_NAMES.indexOf(String(monthName).toLowerCase());
   if (!bm || examMonthIdx === -1 || !yearStr) return null;
-  const batchYear = 2000 + Number(bm[1]), batchMonth = Number(bm[2]);
-  const examYear = Number(yearStr), examMonth = examMonthIdx + 1;
-  const elapsed = (examYear * 12 + examMonth) - (batchYear * 12 + batchMonth);
-  if (elapsed < 0) return null;
-  // elapsed === 0 means the exam period is the same calendar month as the
-  // batch's own intake month — ceil(0/3) would give 0, which isn't a valid
-  // semester. Confirmed against real data before treating this as semester
-  // 1 rather than rejecting it: every one of DBS2601's 18 existing records
-  // (the batch that surfaced this) is already semester 1, consistent with
-  // this being that cohort's first exam period, not an error. Every
-  // elapsed value of 1 or more is unaffected — still the original,
-  // separately-validated ceil(elapsed/3).
-  if (elapsed === 0) return 1;
-  return Math.ceil(elapsed / 3);
+  const batchMonth = Number(bm[2]);
+  if (batchMonth < 1 || batchMonth > 12) return null;
+  const semester = termNumber(Number(yearStr), examMonthIdx + 1) - termNumber(2000 + Number(bm[1]), batchMonth) + 1;
+  // Before the batch's own intake term: not a valid semester.
+  return semester < 1 ? null : semester;
 }
 
 let pendingPdfPlan = null;
