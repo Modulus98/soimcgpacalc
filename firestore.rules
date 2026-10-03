@@ -9,32 +9,48 @@ rules_version = '2';
 // rules say otherwise. These rules are that "otherwise".
 //
 // Two roles: admins can read and write everything; viewers can only read.
-// EDIT THIS: replace the placeholder emails below with your real ones —
-// HOP/HOS and yourself under admins, everyone else under viewers. Every
-// request is checked by email only, not by which sign-in method was used —
-// Firestore can't tell Google and email/password sign-ins apart, so your
-// own email/password account needs to be listed under admins here too, or
-// it will lose write access. Keep this file and the app's Settings ->
-// "Admin emails" / "Viewer emails" lists in sync; update all three
-// whenever someone's access changes.
+// The list of who's in each role lives in Firestore itself now (the
+// roles/config document below), not hardcoded here — every device reads
+// the same shared list, so there's no separate copy to keep in sync per
+// browser. An email not in EITHER list is always blocked, no exceptions.
+//
+// Bootstrapping a brand new project: the very first person to sign in
+// becomes the founding admin automatically (the app writes roles/config
+// with just their email under admins). After that document exists, only
+// existing admins can change it — so this only ever fires once per
+// project. If you ever need to reset who has access, an admin can delete
+// the roles/config document directly in the Firestore console, and the
+// next person to sign in becomes the new founding admin.
 
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    function rolesDoc() {
+      return get(/databases/$(database)/documents/roles/config).data;
+    }
+
     function isAdmin() {
       return request.auth != null
-        && request.auth.token.email in [
-          'you@gmail.com',
-          'hop@gmail.com',
-          'hos@gmail.com'
-        ];
+        && exists(/databases/$(database)/documents/roles/config)
+        && request.auth.token.email in rolesDoc().admins;
     }
 
     function isViewer() {
       return request.auth != null
-        && request.auth.token.email in [
-          'colleague@gmail.com'
-        ];
+        && exists(/databases/$(database)/documents/roles/config)
+        && request.auth.token.email in rolesDoc().viewers;
+    }
+
+    match /roles/config {
+      // Any signed-in user can read this — it's how the app (and these
+      // rules, via the functions above) determines a role in the first
+      // place. It reveals who has access, not any student data, so this
+      // is an acceptable trade-off for breaking the bootstrap deadlock.
+      allow read: if request.auth != null;
+      // Writable by an existing admin, OR by anyone at all if this
+      // document doesn't exist yet (the one-time bootstrap).
+      allow write: if request.auth != null
+        && (!exists(/databases/$(database)/documents/roles/config) || isAdmin());
     }
 
     match /records/{recordId} {
@@ -48,6 +64,16 @@ service cloud.firestore {
     }
 
     match /subjectMappings/{mappingId} {
+      allow read: if isAdmin() || isViewer();
+      allow write: if isAdmin();
+    }
+
+    match /config/subjectAlternatives {
+      allow read: if isAdmin() || isViewer();
+      allow write: if isAdmin();
+    }
+
+    match /config/archivedBatches {
       allow read: if isAdmin() || isViewer();
       allow write: if isAdmin();
     }

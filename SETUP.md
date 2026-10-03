@@ -28,26 +28,26 @@ any time someone's access changes.
 3. Google sign-in works with existing Google accounts directly — you don't pre-create users
    for it the way Email/Password needs (that one still needs Users → Add user for each account).
 
-## 4. Deploy the security rules — with your real emails, admins and viewers
-This is the step that actually restricts access — nothing else does.
-1. Open `firestore.rules` (included alongside this file). Find `isAdmin()` and `isViewer()` near
-   the top and replace the placeholder emails with your real ones — HOP/HOS and yourself under
-   `isAdmin()`, everyone else under `isViewer()` — exactly as each person will sign in with.
-2. **Build → Firestore Database → Rules** tab → paste the edited contents in → **Publish**.
-3. Whenever anyone's access changes — added, removed, or moved between the two roles — this file
-   is the one that has to be edited and republished; the rest is just app-side convenience.
+## 4. Deploy the security rules
+1. Paste the contents of `firestore.rules` (included alongside this file) into **Build →
+   Firestore Database → Rules** → **Publish**. No editing needed — unlike some earlier drafts
+   of this file, it no longer hardcodes any emails; who's admin and who's viewer lives in
+   Firestore itself, set up in step 5.
+2. This file is still what actually enforces access — the app's own screens are just convenience
+   on top of it.
 
-## 5. Set the same emails in the app
-1. Open the app → **Settings**.
-2. Under "Admin emails," enter the same admin addresses from step 4, one per line. Under "Viewer
-   emails," enter the same viewer addresses. **Save** each.
-3. These lists only run in the browser — they're what give someone a clear "you're not
-   authorized" message, or the correct read-only view, instead of a wall of confusing errors.
-   Step 4 is what actually enforces it. This is also per-browser storage: if both lists are ever
-   empty on a given browser (a fresh device that's never had them entered), anyone who signs in
-   there is shown as admin by default rather than locked out — harmless, since step 4's rules
-   are what actually decide what they can write. Still worth entering the real lists on any
-   device you specifically want to show the read-only Viewer experience.
+## 5. Sign in — the first person becomes the founding admin
+1. Open the app and sign in (Google or email/password). If this is a brand new project with no
+   one set up yet, **the very first person to sign in automatically becomes the founding admin** —
+   nothing to configure first. That only ever happens once; after this first sign-in, every
+   further sign-in is checked against the real list.
+2. As an admin, go to **Settings** to add further Admin or Viewer emails — one per line, under
+   each list, **Save** each. These are stored in Firestore itself, shared across every device
+   immediately — there's no separate copy to keep in sync per browser.
+3. An email that isn't on either list is always blocked at sign-in, with no exception (other
+   than the one-time founding-admin bootstrap above).
+4. Need to start over? An admin can delete the `roles/config` document directly in the Firestore
+   console — the next person to sign in becomes the new founding admin.
 
 ## 6. Register a web app and get your config
 1. Project Overview (gear icon) → **Project settings → General**.
@@ -85,14 +85,14 @@ sign-in screen — the app's behavior doesn't change based on where it's hosted.
 
 ## Notes
 - The Firebase config object is not a secret — it's meant to be visible in a web app's source,
-  the same as every other Firebase project. Steps 4 and 5 (the rules, and the matching Admin/
-  Viewer lists) are what actually keeps the data private and read-only where it should be, not
-  hiding the config.
-- If someone's access ever changes — added, removed, or moved between Admin and Viewer — update
-  all three places: `firestore.rules` (redeploy it), and both Settings lists on every browser you
-  administer from. Missing the rules file means they can sign in but every read (viewer) or write
-  (admin) still fails; missing a browser's Settings lists just means that one browser shows the
-  wrong UI until it's updated (see step 5's fallback behavior).
+  the same as every other Firebase project. Step 4's rules, together with the Admin/Viewer list
+  in Firestore (step 5), are what actually keep the data private and read-only where it should
+  be, not hiding the config.
+- If someone's access ever changes — added, removed, or moved between Admin and Viewer — an
+  admin updates it once in Settings. Because the list lives in Firestore, every device sees the
+  change immediately; there's nothing to keep in sync per browser anymore.
+- An email that isn't on either list is always blocked at sign-in — no fallback, no exceptions,
+  other than the one-time founding-admin bootstrap described in step 5.
 - PDF import (loading a CMS "Student Result Summary" export) is built in — the "Import PDF"
   button in the top bar, admin-only. It reads marks, grade, and credit hour straight from the
   PDF; derives which semester each result belongs to from the student's batch and the exam

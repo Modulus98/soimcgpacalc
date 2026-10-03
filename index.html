@@ -238,6 +238,50 @@ body:not(.authenticated) .app-shell { display: none; }
   opacity: 0.68;
 }
 
+/* Semester standing highlights on GPA cells, and the count rows beneath
+   each GPA column: green = President's List, yellow = Dean's List,
+   red = Probation. */
+td.gpa-president { background: #c9e6c4; color: #1d5a24; font-weight: 600; }
+td.gpa-dean      { background: #fff0b3; color: #6b5200; font-weight: 600; }
+td.gpa-probation { background: #f5c6c0; color: #8a2417; font-weight: 600; }
+tr.summary-row td { border-top: 2px solid var(--line); font-size: 0.82rem; }
+tr.summary-row td:first-child { font-weight: 600; text-align: left; }
+tr.summary-row + tr.summary-row td { border-top: 1px solid var(--line); }
+.standing-swatch {
+  display: inline-block; width: 11px; height: 11px; border-radius: 2px;
+  margin-right: 8px; vertical-align: -1px; border: 1px solid rgba(0,0,0,0.12);
+}
+.standing-swatch.gpa-president { background: #c9e6c4; }
+.standing-swatch.gpa-dean      { background: #fff0b3; }
+.standing-swatch.gpa-probation { background: #f5c6c0; }
+.note-inline { font-weight: 400; color: var(--muted); margin-left: 4px; }
+
+/* Long "yet to be taken" lists scroll inside a fixed-height box instead of
+   stretching the card/row (table cells are nowrap by default, so the cell
+   version turns wrapping back on). */
+.stat-card .stat-list {
+  margin-top: 6px; max-height: 5.2em; overflow-y: auto; padding-right: 6px;
+  font-size: 0.82rem; line-height: 1.45; overflow-wrap: anywhere;
+  border-top: 1px solid var(--line); padding-top: 6px;
+}
+.cell-scroll {
+  white-space: normal; min-width: 170px; max-width: 250px; max-height: 4.4em;
+  overflow-y: auto; padding-right: 6px; font-size: 0.78rem; line-height: 1.45;
+}
+
+/* Subject table: "In sem GPA" column and the per-semester GPA line. */
+.gpa-in  { color: #1d5a24; font-weight: 600; }
+.gpa-out { color: var(--muted); font-size: 0.78rem; cursor: help; }
+table.data tbody tr.sem-subtotal td {
+  background: #f1ede1; border-top: 1px solid var(--line); border-bottom: 2px solid var(--line);
+  font-size: 0.84rem; white-space: normal;
+}
+table.data tbody tr.sem-subtotal:hover { background: #f1ede1; cursor: default; }
+.sem-gpa { display: inline-block; min-width: 2.6em; margin: 0 6px; padding: 1px 8px; border-radius: 4px; font-weight: 700; text-align: center; }
+.sem-gpa.gpa-president { background: #c9e6c4; color: #1d5a24; }
+.sem-gpa.gpa-dean      { background: #fff0b3; color: #6b5200; }
+.sem-gpa.gpa-probation { background: #f5c6c0; color: #8a2417; }
+
 .intake-tab {
   border: none;
   background: none;
@@ -652,6 +696,7 @@ table.data td.checkbox-cell, table.data th.checkbox-cell { width: 30px; }
           <h2 id="intake-title">—</h2>
           <div class="sub" id="intake-sub"></div>
         </div>
+        <button id="toggle-archive-batch" class="btn small admin-only" style="margin-left:auto;margin-right:12px"></button>
         <div class="field" style="min-width:160px">
           <label for="status-filter">Show</label>
           <select id="status-filter">
@@ -879,6 +924,11 @@ service cloud.firestore {
     }
 
     match /config/subjectAlternatives {
+      allow read: if isAdmin() || isViewer();
+      allow write: if isAdmin();
+    }
+
+    match /config/archivedBatches {
       allow read: if isAdmin() || isViewer();
       allow write: if isAdmin();
     }
@@ -1181,19 +1231,59 @@ function computeStudentSummary(records, config = ENGINE_CONFIG) {
   // deducting "the other one" and deducting "the resolving row's own"
   // happen to be the same number; it only changes the result for 3-or-more
   // attempts, which didn't exist anywhere in the historical data.
+  // Deducted once per subject (every sitting except the last one counts
+  // for nothing extra) rather than once per resolving row — with a failed
+  // resit followed later by a passing retake there are two resolving rows
+  // for one subject, and per-row deduction would take the credit hours off
+  // twice. Identical to the per-row result whenever a subject has a single
+  // resolving row, which is every historical case.
   let resolvedDeduction = 0;
-  for (const r of records.filter(isResolved)) {
-    resolvedDeduction += sum(records.filter(x => x.subjectCode === r.subjectCode && x.id !== r.id), 'creditHour');
+  const attemptsBySubject = {};
+  for (const r of records) (attemptsBySubject[r.subjectCode] = attemptsBySubject[r.subjectCode] || []).push(r);
+  for (const atts of Object.values(attemptsBySubject)) {
+    if (!atts.some(isResolved)) continue;
+    const last = [...atts].sort((a, b) => a.semester - b.semester || (isResolved(a) ? 1 : 0) - (isResolved(b) ? 1 : 0)).pop();
+    resolvedDeduction += sum(atts, 'creditHour') - last.creditHour;
   }
   const totalCumCt = sum(gpaScope, 'creditHour') - resolvedDeduction;
   const totalCumCtExclRepeat = sum(gpaScope.filter(countsTowardFinal), 'creditHour');
   const totalCumCtInclMPU = sum(records.filter(countsTowardFinal), 'creditHour');
 
+  // A "resit sitting" is any later sitting of a subject within the SAME
+  // semester as an earlier one (same-semester = resit; a repeat in a
+  // different semester is a retake, which is a normal enrolment in that
+  // later semester and stays in its GPA). Semester GPA follows the FIRST
+  // attempt only: the resit never changes it. (CGPA is the overall figure
+  // and is unaffected by this — its own resolved/removed-points logic
+  // already handles the superseded attempt.) Within a same-semester group,
+  // whichever record resolves another is by definition the later sitting.
+  const sittingGroups = {};
+  for (const r of records) (sittingGroups[r.subjectCode + '|' + r.semester] = sittingGroups[r.subjectCode + '|' + r.semester] || []).push(r);
+  const resitSittings = new Set();
+  for (const g of Object.values(sittingGroups)) {
+    if (g.length < 2) continue;
+    [...g].sort((a, b) => (isResolved(a) ? 1 : 0) - (isResolved(b) ? 1 : 0)).slice(1).forEach(r => resitSittings.add(r));
+  }
+
+  // Which records feed a semester's GPA, for the subject table's "In sem
+  // GPA" column: 'counts', 'resit' (a later same-semester sitting — GPA
+  // follows the first attempt), or 'mpu' (MPU subjects are outside GPA for
+  // some batches). Keyed by record id; uses the exact same sets as the GPA
+  // calculation just below, so the column can never disagree with the number.
+  const inGpaScope = new Set(gpaScope);
+  const gpaStatusById = {};
+  for (const r of records) {
+    if (r.id == null) continue;
+    gpaStatusById[r.id] = !inGpaScope.has(r) ? 'mpu' : resitSittings.has(r) ? 'resit' : 'counts';
+  }
+
   const gpaBySemester = {};
+  const creditHoursBySemester = {};
   const semesters = [...new Set(records.map(r => r.semester))].sort((a, b) => a - b);
   for (const sem of semesters) {
-    const recs = gpaScope.filter(r => r.semester === sem);
+    const recs = gpaScope.filter(r => r.semester === sem && !resitSittings.has(r));
     const ct = sum(recs, 'creditHour');
+    creditHoursBySemester[sem] = ct;
     gpaBySemester[sem] = ct ? round2(sum(recs, 'totalGradePoint') / ct) : null;
   }
 
@@ -1203,18 +1293,76 @@ function computeStudentSummary(records, config = ENGINE_CONFIG) {
     ? round2(totalCumGradePointExclRepeat / totalCumCtExclRepeat) : null;
 
   const needingRetake = new Set(records.filter(r => r.needRetake === 1 || r.needRetake === true).map(r => r.subjectCode));
-  const resolvedSubjects = new Set(records.filter(isResolved).map(r => r.subjectCode));
-  const pendingRetakeSubjects = [...needingRetake].filter(s => !resolvedSubjects.has(s));
-  const repeatCount = pendingRetakeSubjects.length;
+  // A resolving row clears the subject unless it was marked as a resit that
+  // still failed (stillFailing — only ever set on newly entered records, so
+  // every historical case is unchanged).
+  const resolvedSubjects = new Set(records.filter(r => isResolved(r) && !r.stillFailing).map(r => r.subjectCode));
+  const unresolvedSubjects = [...needingRetake].filter(s => !resolvedSubjects.has(s));
+
+  // Resit and retake are different things and were wrongly lumped into one
+  // list. A subject still outstanding is waiting on a RESIT only when:
+  // its first-ever sitting came out C- (the one grade a resit applies to —
+  // D/D+/E/F can't be resat and go straight to retake), no resit has been
+  // sat yet (the pending sitting is still that first one — a failed resit
+  // is no longer resit-eligible), and the student hasn't moved on to a
+  // later semester (once they have, a resit result that never came in
+  // lapses into a retake automatically — derived live from the records,
+  // nothing to update by hand). Everything else outstanding is a retake.
+  const lastSemester = records.length ? Math.max(...records.map(r => r.semester)) : 0;
+  const pendingResitSubjects = [];
+  const pendingRetakeSubjects = [];
+  for (const subject of unresolvedSubjects) {
+    const attempts = records.filter(r => r.subjectCode === subject)
+      .sort((a, b) => a.semester - b.semester || (isResolved(a) ? 1 : 0) - (isResolved(b) ? 1 : 0));
+    const pendingRec = [...attempts].reverse().find(r => r.needRetake === 1 || r.needRetake === true);
+    const awaitingResit = attempts.length === 1 && pendingRec.grade === 'C-' && lastSemester <= pendingRec.semester;
+    (awaitingResit ? pendingResitSubjects : pendingRetakeSubjects).push(subject);
+  }
+  // Total still-outstanding subjects (resit or retake) — what eligibility
+  // and the Excel "repeat subjects required" column have always meant.
+  const repeatCount = pendingResitSubjects.length + pendingRetakeSubjects.length;
 
   const eligibility = totalCumCtInclMPU === config.totalCreditsRequired && repeatCount === 0
     ? 'Eligible' : 'Not Eligible';
 
+  // Termination triggers: GPA below 2.00 in 3 consecutive semesters, or the
+  // same subject failed in 3 different semesters.
+  const terminationTriggers = [];
+  let lowRun = [];
+  for (const sem of semesters) {
+    const g = gpaBySemester[sem];
+    if (g != null && g < 2.00) {
+      lowRun = (lowRun.length && sem === lowRun[lowRun.length - 1] + 1) ? [...lowRun, sem] : [sem];
+      if (lowRun.length === 3) terminationTriggers.push(`GPA below 2.00 for 3 consecutive semesters (Sem ${lowRun[0]}–${lowRun[2]})`);
+    } else {
+      lowRun = [];
+    }
+  }
+  const failedSemestersBySubject = {};
+  for (const r of records) {
+    if (r.achievement === 'Fail') (failedSemestersBySubject[r.subjectCode] = failedSemestersBySubject[r.subjectCode] || new Set()).add(r.semester);
+  }
+  for (const [subject, sems] of Object.entries(failedSemestersBySubject)) {
+    if (sems.size >= 3) terminationTriggers.push(`Failed ${subject} in ${sems.size} different semesters (Sem ${[...sems].sort((a, b) => a - b).join(', ')})`);
+  }
+
   return {
     totalCumGradePoint, totalCumGradePointExclRepeat, totalCumCt, totalCumCtExclRepeat,
-    totalCumCtInclMPU, gpaBySemester, cgpaTemporary, cgpaFinal, eligibility,
-    repeatCount, pendingRetakeSubjects, semesters,
+    totalCumCtInclMPU, gpaBySemester, creditHoursBySemester, gpaStatusById, cgpaTemporary, cgpaFinal, eligibility,
+    repeatCount, pendingRetakeSubjects, pendingResitSubjects, terminationTriggers, semesters,
   };
+}
+
+// Semester standing from a semester's GPA and the credit hours behind it.
+// President's List: GPA > 3.74; Dean's List: GPA > 3.49 (up to 3.74) — both
+// need at least 12 credit hours that semester; Probation: GPA < 2.00 (no
+// credit-hour minimum). Judged on the GPA as displayed (2 decimals).
+function gpaStanding(gpa, creditHours) {
+  if (gpa == null) return null;
+  if (gpa < 2.00) return 'probation';
+  if (creditHours >= 12 && gpa > 3.74) return 'president';
+  if (creditHours >= 12 && gpa > 3.49) return 'dean';
+  return null;
 }
 
 const MAX_SEMESTER = 7;
@@ -1284,6 +1432,10 @@ const Store = {
     let parsedAltGroups = null;
     if (savedAltGroups) { try { parsedAltGroups = JSON.parse(savedAltGroups); } catch (e) {} }
     this.subjectAlternativeGroups = parsedAltGroups || [[ 'MPU2212', 'MPU2222' ]];
+    const savedArchived = localStorage.getItem('soim_archived_batches');
+    let parsedArchived = null;
+    if (savedArchived) { try { parsedArchived = JSON.parse(savedArchived); } catch (e) {} }
+    this.archivedBatches = parsedArchived || [];
     this._notify();
   },
 
@@ -1347,6 +1499,7 @@ const Store = {
     if (this.unsubMappings) { this.unsubMappings(); this.unsubMappings = null; }
     if (this.unsubRoles) { this.unsubRoles(); this.unsubRoles = null; }
     if (this.unsubSubjectAlternatives) { this.unsubSubjectAlternatives(); this.unsubSubjectAlternatives = null; }
+    if (this.unsubArchivedBatches) { this.unsubArchivedBatches(); this.unsubArchivedBatches = null; }
     this.records = [];
     this.statuses = {};
     this.subjectMappings = [];
@@ -1543,6 +1696,38 @@ const Store = {
     );
   },
 
+  // Which batches are archived — now a deliberate admin choice (a button
+  // in the intake view toggles this), not something computed automatically
+  // from student statuses. Same single-document, live-synced pattern as
+  // subjectAlternativeGroups above, and the same lesson learned from
+  // fixing that one applies here too: never reset this to [] in
+  // _unsubscribeAll, since connectFirebase calls that before attempting
+  // its connection, and a failed connection falling back to local mode
+  // would otherwise wipe it with nothing to restore it.
+  archivedBatches: [],
+
+  async setArchivedBatches(batches) {
+    if (this.mode === 'firestore') {
+      await this.db.collection('config').doc('archivedBatches').set({ batches });
+    } else {
+      localStorage.setItem('soim_archived_batches', JSON.stringify(batches));
+      this.archivedBatches = batches;
+      this._notify();
+    }
+  },
+
+  _subscribeArchivedBatches() {
+    if (this.mode !== 'firestore') return;
+    if (this.unsubArchivedBatches) this.unsubArchivedBatches();
+    this.unsubArchivedBatches = this.db.collection('config').doc('archivedBatches').onSnapshot(
+      (snap) => {
+        if (snap.exists) this.archivedBatches = (snap.data() || {}).batches || [];
+        this._notify();
+      },
+      (err) => console.error('Firestore archived-batches listen failed', err)
+    );
+  },
+
   // Upserts by oldCode: re-uploading a mapping for a code that's already
   // mapped replaces it rather than creating a duplicate.
   async upsertSubjectMapping(mapping) {
@@ -1619,6 +1804,7 @@ const Auth = {
         Store._subscribeMappings();
         Store._subscribeRoles();
         Store._subscribeSubjectAlternatives();
+        Store._subscribeArchivedBatches();
       } else {
         this.currentUser = null;
         this.currentRole = null;
@@ -1815,7 +2001,7 @@ function findPendingRetake(studentId, subjectCode, excludeId = null) {
   // removedGradePoints lands on the LATER attempt that resolves a failure,
   // not on the failed row itself — so "resolved" means some row's
   // removedGradePoints matches this failed row's own totalGradePoint.
-  const resolvedAmounts = recs.filter(r => r.subjectCode === code && r.removedGradePoints && r.removedGradePoints !== 0).map(r => r.removedGradePoints);
+  const resolvedAmounts = recs.filter(r => r.subjectCode === code && r.removedGradePoints && r.removedGradePoints !== 0 && !r.stillFailing).map(r => r.removedGradePoints);
   return failedAttempts.find(f => !resolvedAmounts.some(amt => Math.abs(amt - f.totalGradePoint) < 0.005)) || null;
 }
 
@@ -1910,15 +2096,12 @@ function renderConnectionPill() {
   }
 }
 
-// A batch with at least one student, where every single one is Graduated
-// or Withdrawn (none still Active), is done — nothing left to track day to
-// day. Archived by default so the sub-tab row doesn't just keep growing as
-// batch after batch finishes over the years; still reachable via the
-// "Show archived" toggle, never deleted or hidden from exports/search.
+// A deliberate admin choice now (a button in the intake view), not
+// computed automatically from student statuses — still reachable via the
+// "Show archived" toggle once archived, never deleted or hidden from
+// exports/search.
 function isBatchArchived(batch) {
-  const students = getStudentsInBatch(batch);
-  if (!students.length) return false;
-  return students.every(s => s.status === 'graduated' || s.status === 'withdrawn');
+  return Store.archivedBatches.includes(batch);
 }
 
 let showArchivedBatches = false; // resets each page load — a view toggle, not a saved preference
@@ -2011,6 +2194,22 @@ function renderIntakeView() {
        from a student's page once you have at least one record.</div>`;
     return;
   }
+  const archiveBtn = document.getElementById('toggle-archive-batch');
+  const archived = isBatchArchived(state.batch);
+  archiveBtn.textContent = archived ? 'Unarchive this batch' : 'Archive this batch';
+  archiveBtn.onclick = async () => {
+    const current = Store.archivedBatches;
+    const next = archived ? current.filter(b => b !== state.batch) : [...current, state.batch];
+    try {
+      await Store.setArchivedBatches(next);
+      showToast(archived ? `${state.batch} unarchived.` : `${state.batch} archived.`);
+      render();
+    } catch (err) {
+      console.error('Archive toggle failed', err);
+      showToast('Could not update — check your Firestore rules and connection.', true);
+    }
+  };
+
   const allStudents = getStudentsInBatch(state.batch);
   const filter = document.getElementById('status-filter').value;
   const students = filter === 'all' ? allStudents : allStudents.filter(s => s.status === filter);
@@ -2018,7 +2217,10 @@ function renderIntakeView() {
 
   const eligibleCount = rows.filter(r => r.summary.eligibility === 'Eligible').length;
   const avgCgpa = rows.length ? round2(sum(rows.map(r => ({ v: r.summary.cgpaFinal || 0 })), 'v') / rows.length) : 0;
-  const pendingRepeats = sum(rows.map(r => ({ v: r.summary.repeatCount })), 'v');
+  // Number of students needing action, not number of outstanding subjects
+  // (a count of subjects says nothing about how many people are affected).
+  const studentsNeedingRetake = rows.filter(r => r.summary.pendingRetakeSubjects.length > 0).length;
+  const studentsAwaitingResit = rows.filter(r => r.summary.pendingResitSubjects.length > 0).length;
 
   document.getElementById('intake-title').textContent = state.batch;
   document.getElementById('intake-sub').textContent =
@@ -2028,7 +2230,8 @@ function renderIntakeView() {
     <div class="stat-card"><div class="label">Students</div><div class="value">${rows.length}</div></div>
     <div class="stat-card"><div class="label">Avg CGPA (Final)</div><div class="value">${avgCgpa || '—'}</div></div>
     <div class="stat-card"><div class="label">Eligible to graduate</div><div class="value">${eligibleCount} / ${rows.length}</div></div>
-    <div class="stat-card"><div class="label">Subjects still pending retake</div><div class="value">${pendingRepeats}</div></div>
+    <div class="stat-card"><div class="label">Students requiring retake</div><div class="value">${studentsNeedingRetake} / ${rows.length}</div></div>
+    <div class="stat-card"><div class="label">Students awaiting resit</div><div class="value">${studentsAwaitingResit} / ${rows.length}</div></div>
   `;
 
   const maxSem = Math.max(1, ...rows.flatMap(r => r.summary.semesters));
@@ -2043,7 +2246,7 @@ function renderIntakeView() {
       <th>Total Cum Ct (incl. MPU)</th>
       ${semCols.map(n => `<th>GPA Sem ${n}</th>`).join('')}
       <th class="highlight">CGPA Temp.</th><th>CGPA Final</th>
-      <th>Eligibility</th><th>Repeats needed</th><th>Pending subjects</th><th>Yet to be taken</th>
+      <th>Eligibility</th><th>Pending resit</th><th>Pending retake</th><th>Termination trigger</th><th>Yet to be taken</th>
     </tr>`;
 
   const tbody = rows.map(r => {
@@ -2059,16 +2262,39 @@ function renderIntakeView() {
       <td>${s.totalCumGradePoint}</td><td>${s.totalCumGradePointExclRepeat}</td>
       <td>${s.totalCumCt}</td><td>${s.totalCumCtExclRepeat}</td>
       <td>${s.totalCumCtInclMPU}</td>
-      ${semCols.map(n => `<td>${s.gpaBySemester[n] ?? '–'}</td>`).join('')}
+      ${semCols.map(n => {
+        const standing = gpaStanding(s.gpaBySemester[n], s.creditHoursBySemester[n]);
+        return `<td${standing ? ` class="gpa-${standing}"` : ''}>${s.gpaBySemester[n] ?? '–'}</td>`;
+      }).join('')}
       <td class="highlight">${s.cgpaTemporary ?? '–'}</td><td>${s.cgpaFinal ?? '–'}</td>
-      <td>${pill}</td><td>${s.repeatCount}</td>
-      <td>${s.repeatCount ? escapeHtml(s.pendingRetakeSubjects.join(', ')) : '–'}</td>
-      <td>${yetToTake.length ? escapeHtml(yetToTake.join(', ')) : '–'}</td>
+      <td>${pill}</td>
+      <td>${s.pendingResitSubjects.length ? escapeHtml(s.pendingResitSubjects.join(', ')) : '–'}</td>
+      <td>${s.pendingRetakeSubjects.length ? escapeHtml(s.pendingRetakeSubjects.join(', ')) : '–'}</td>
+      <td>${s.terminationTriggers.length ? s.terminationTriggers.map(t => `<span class="pill warn" style="display:block;margin-bottom:2px;white-space:normal">⚠ ${escapeHtml(t)}</span>`).join('') : '–'}</td>
+      <td>${yetToTake.length ? `<div class="cell-scroll" title="${yetToTake.length} subjects">${escapeHtml(yetToTake.join(', '))}</div>` : '–'}</td>
     </tr>`;
   }).join('');
 
+  // Semester standing counts, under each GPA column: how many of the
+  // students shown are on the President's List, the Dean's List, or on
+  // Probation that semester — the same students and the same colours as
+  // the cells above, so the numbers always match what's highlighted.
+  const leadingCols = (isAdmin() ? 1 : 0) + 8;
+  const trailingCols = 7; // CGPA Temp, CGPA Final, Eligibility, Pending resit, Pending retake, Termination, Yet to be taken
+  const standingCount = (n, which) => rows.filter(r => gpaStanding(r.summary.gpaBySemester[n], r.summary.creditHoursBySemester[n]) === which).length;
+  const summaryRow = (cls, label, which) => `<tr class="summary-row">
+      <td colspan="${leadingCols}"><span class="standing-swatch gpa-${cls}"></span>${label}</td>
+      ${semCols.map(n => `<td class="gpa-${cls}">${standingCount(n, which)}</td>`).join('')}
+      <td colspan="${trailingCols}"></td>
+    </tr>`;
+  const summaryRows = students.length
+    ? summaryRow('president', 'Number on President\u2019s List <span class="note-inline">(GPA &gt; 3.74, at least 12 credit hours)</span>', 'president')
+      + summaryRow('dean', 'Number on Dean\u2019s List <span class="note-inline">(GPA &gt; 3.49, at least 12 credit hours)</span>', 'dean')
+      + summaryRow('probation', 'Number on Probation <span class="note-inline">(GPA &lt; 2.00)</span>', 'probation')
+    : '';
+
   document.getElementById('intake-table').innerHTML = students.length
-    ? `<table class="data"><thead>${thead}</thead><tbody>${tbody}</tbody></table>`
+    ? `<table class="data"><thead>${thead}</thead><tbody>${tbody}${summaryRows}</tbody></table>`
     : allStudents.length
       ? `<div class="empty-state">No students match this filter. <button class="btn small" id="clear-status-filter">Show all statuses</button></div>`
       : `<div class="empty-state">No students in this intake yet.</div>`;
@@ -2117,6 +2343,8 @@ function renderStudentView() {
   if (!records.length) { setView('intake'); return; }
   const { name, batch } = records[0];
   const s = computeStudentSummary(records);
+  studentPendingResit = new Set(s.pendingResitSubjects);
+  studentGpaStatus = s.gpaStatusById;
 
   document.getElementById('student-name').textContent = name;
   document.getElementById('student-meta').textContent = `${state.studentId} · ${batch}`;
@@ -2150,18 +2378,37 @@ function renderStudentView() {
     <div class="stat-card"><div class="label">CGPA (Final)</div><div class="value">${s.cgpaFinal ?? '–'}</div></div>
     <div class="stat-card"><div class="label">CGPA (Temporary)</div><div class="value">${s.cgpaTemporary ?? '–'}</div></div>
     <div class="stat-card"><div class="label">Eligibility</div><div class="value">${s.eligibility}</div></div>
-    <div class="stat-card"><div class="label">Subjects pending retake</div><div class="value">${s.repeatCount}${s.repeatCount ? ' — ' + s.pendingRetakeSubjects.join(', ') : ''}</div></div>
+    <div class="stat-card"><div class="label">Subjects pending resit</div><div class="value">${s.pendingResitSubjects.length}${s.pendingResitSubjects.length ? ' — ' + s.pendingResitSubjects.join(', ') : ''}</div></div>
+    <div class="stat-card"><div class="label">Subjects pending retake</div><div class="value">${s.pendingRetakeSubjects.length}${s.pendingRetakeSubjects.length ? ' — ' + s.pendingRetakeSubjects.join(', ') : ''}</div></div>
     <div class="stat-card"><div class="label">Subjects sat more than once</div><div class="value">${multiAttemptSubjects.length}${multiAttemptSubjects.length ? ' — ' + multiAttemptSubjects.join(', ') : ''}</div></div>
-    <div class="stat-card"><div class="label">Subjects yet to be taken</div><div class="value">${yetToTake.length}${yetToTake.length ? ' — ' + yetToTake.join(', ') : ''}</div></div>
+    <div class="stat-card"><div class="label">Subjects yet to be taken</div><div class="value">${yetToTake.length}</div>${yetToTake.length ? `<div class="stat-list" tabindex="0">${yetToTake.map(escapeHtml).join(', ')}</div>` : ''}</div>
+    ${s.terminationTriggers.length ? `<div class="stat-card" style="border-color:var(--warn)"><div class="label" style="color:var(--warn)">⚠ Termination trigger</div><div class="value" style="font-size:0.95rem;line-height:1.35">${s.terminationTriggers.map(escapeHtml).join('<br>')}</div></div>` : ''}
   `;
 
-  const rows = records.map(r => renderRecordRow(r)).join('');
+  // Grouped by semester, each group closed by a GPA line built from the
+  // rows marked "Yes" in the In sem GPA column — so the semester GPA can be
+  // checked straight off the table: total grade points ÷ credit hours.
+  let rows = '';
+  for (const sem of [...new Set(records.map(r => r.semester))]) {
+    const semRecs = records.filter(r => r.semester === sem);
+    rows += semRecs.map(r => renderRecordRow(r)).join('');
+    const counted = semRecs.filter(r => s.gpaStatusById[r.id] === 'counts');
+    const gpa = s.gpaBySemester[sem], ct = s.creditHoursBySemester[sem];
+    const standing = gpaStanding(gpa, ct);
+    const standingLabel = { president: 'President\u2019s List', dean: 'Dean\u2019s List', probation: 'Probation' }[standing];
+    rows += `<tr class="sem-subtotal"><td colspan="11">
+      <strong>Sem ${sem} GPA</strong>
+      <span class="sem-gpa${standing ? ' gpa-' + standing : ''}">${gpa ?? '–'}</span>
+      ${standingLabel ? `<span class="pill ${standing === 'probation' ? 'warn' : 'good'}">${standingLabel}</span>` : ''}
+      <span class="note-inline">${gpa == null ? 'no rows count toward this semester\u2019s GPA' : `${round2(sum(counted, 'totalGradePoint'))} total grade points ÷ ${ct} credit hours — the ${counted.length} row${counted.length === 1 ? '' : 's'} marked \u201cYes\u201d above`}</span>
+    </td></tr>`;
+  }
 
   document.getElementById('student-table').innerHTML = `
     <table class="data">
       <thead><tr>
         <th>Sem</th><th>Subject</th><th>Ct Hr</th><th>Marks</th><th>Grade</th>
-        <th>Grade Pt</th><th>Total GP</th><th>Retake?</th><th>Removed GP</th><th></th>
+        <th>Grade Pt</th><th>Total GP</th><th>In sem GPA</th><th>Retake?</th><th>Removed GP</th><th></th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
@@ -2186,6 +2433,21 @@ function renderStudentView() {
 let editingRecordId = null;
 const selectedStudentIds = new Set();
 
+// Subjects currently waiting on a resit for the student on screen — set by
+// renderStudentView so each row's Retake? cell can say "Resit" rather than
+// a bare "Yes" (resit and retake are different outcomes).
+let studentPendingResit = new Set();
+// Per-record "feeds the semester GPA?" status for the student on screen
+// (from computeStudentSummary's gpaStatusById), set by renderStudentView.
+let studentGpaStatus = {};
+
+function gpaStatusCell(status) {
+  if (status === 'resit') return '<span class="gpa-out" title="A later sitting of this subject in the same semester (a resit). Semester GPA follows the first attempt, so this row is left out of it.">No — resit</span>';
+  if (status === 'mpu') return '<span class="gpa-out" title="MPU subjects are outside GPA for this batch.">No — MPU</span>';
+  if (status === 'counts') return '<span class="gpa-in">Yes</span>';
+  return '—';
+}
+
 function renderRecordRow(r) {
   const isRetake = r.needRetake === 1 || r.needRetake === true;
   const wasRemapped = r.originalSubjectCode !== r.subjectCode || r.originalCreditHour !== r.creditHour;
@@ -2201,6 +2463,7 @@ function renderRecordRow(r) {
       <td><input type="number" class="e-marks" value="${r.marks}" min="0" max="100"></td>
       <td colspan="2" style="color:var(--muted);font-size:0.76rem">computed on save</td>
       <td></td>
+      <td></td>
       <td><input type="checkbox" class="e-retake" ${isRetake ? 'checked' : ''}></td>
       <td><input type="number" class="e-removed" value="${r.removedGradePoints || 0}" step="0.01"></td>
       <td class="row-actions">
@@ -2208,7 +2471,7 @@ function renderRecordRow(r) {
         <button class="btn small" data-cancel="1">Cancel</button>
       </td>
     </tr>
-    ${isRetake ? `<tr><td colspan="10" style="background:var(--warn-soft);color:var(--warn);font-size:0.74rem;padding:6px 10px">
+    ${isRetake ? `<tr><td colspan="11" style="background:var(--warn-soft);color:var(--warn);font-size:0.74rem;padding:6px 10px">
       ⚠ This result is currently marked as pending retake. If you're entering the result of that
       retake or resit, cancel this edit and use "Add result" below instead — it'll preserve this
       record and add the new one alongside it. Saving changes here replaces this record in place,
@@ -2246,8 +2509,9 @@ function renderRecordRow(r) {
     <td>${escapeHtml(r.subjectCode)}${wasRemapped ? `<br><span style="color:var(--muted);font-size:0.72rem">was ${escapeHtml(r.originalSubjectCode)}${r.originalCreditHour ? `, ${r.originalCreditHour} ct hr` : ''}</span>` : ''}${attemptNote}</td>
     <td>${r.creditHour}</td>
     <td>${r.marks}</td><td>${r.grade}${r.achievement ? `<br><span style="color:var(--muted);font-size:0.72rem">${r.achievement}</span>` : ''}</td><td>${r.gradePoint}</td><td>${r.totalGradePoint}</td>
-    <td>${isRetake ? 'Yes' : '—'}</td>
-    <td>${r.removedGradePoints ? r.removedGradePoints : '—'}</td>
+    <td>${gpaStatusCell(studentGpaStatus[r.id])}</td>
+    <td>${isRetake || r.stillFailing ? (studentPendingResit.has(r.subjectCode) ? 'Resit' : 'Yes') : '—'}</td>
+    <td>${round2(r.removedGradePoints || 0) ? round2(r.removedGradePoints) : '—'}</td>
     <td class="row-actions">${isAdmin() ? `
       <button class="btn small" data-edit="${r.id}">Edit</button>
       <button class="btn small danger" data-del="${r.id}">Remove</button>` : ''}
@@ -2293,7 +2557,7 @@ function wireRecordRowEvents() {
         creditHour: Number(row.querySelector('.e-credit').value) || creditHourFromSubjectCode(subjectCode),
         marks: Number(row.querySelector('.e-marks').value),
         needRetake: row.querySelector('.e-retake').checked ? 1 : 0,
-        removedGradePoints: Number(row.querySelector('.e-removed').value) || 0,
+        removedGradePoints: round2(Number(row.querySelector('.e-removed').value) || 0),
       };
       if (!patch.needRetake && findPendingRetake(state.studentId, subjectCode, btn.dataset.save)) patch.resolvesPriorAttempt = true;
       const validationError = validateRecordInput(patch);
@@ -2525,6 +2789,107 @@ function renderAuditView() {
       them at once — no need to open each student's page individually anymore, though that still works too
       for one at a time. Selection clears when you switch intake or change the status filter, so it can't
       silently carry over to a different set of students than you were looking at.</p>
+    </div>
+    <div class="audit-item open">
+      <strong>Subject table: an "In sem GPA" column and a GPA line per semester; long yet-to-take lists scroll</strong><span class="tag">Added</span>
+      <p>To make semester GPA checkable straight from the subject table: a new <strong>In sem GPA</strong>
+      column says whether each row feeds its semester's GPA — <em>Yes</em>, <em>No — resit</em> (a later
+      same-semester sitting; the GPA follows the first attempt) or <em>No — MPU</em> (for batches where MPU sits
+      outside GPA). Each semester now ends with a GPA line — total grade points ÷ credit hours, built only from
+      the rows marked Yes, with a President's / Dean's / Probation tag where it applies. The column and the
+      number come from the very same sets the GPA calculation uses, so they can't disagree; checked for every
+      semester of all 38 real students. Separately, the "Subjects yet to be taken" list on the student page and
+      in the intake table was growing without limit (in the table it also forced the whole row very wide) — it
+      now scrolls inside a fixed-height box.</p>
+    </div>
+    <div class="audit-item open">
+      <strong>Resit and retake are now separate — a failed resit goes to retake, and a lapsed resit becomes a retake automatically</strong><span class="tag">Fixed</span>
+      <p>Resit and retake had been lumped into one "pending retake" list. They're now two lists
+      ("Pending resit" and "Pending retake", on the student page, the intake table, and both exports):</p>
+      <ul>
+        <li><strong>Awaiting resit</strong> — the first sitting came out <strong>C-</strong> (the only grade a
+        resit applies to), no resit has been sat yet, and the student hasn't moved on to a later semester.</li>
+        <li><strong>Pending retake</strong> — everything else outstanding: D / D+ / E / F (can't be resat),
+        a resit that was sat and <em>failed</em>, and a C- whose resit result never came in before the student's
+        next semester appeared. That last one is derived live from the records — there's nothing to update by
+        hand; the moment the student has a record in a later semester, a still-open C- shows as retake.</li>
+      </ul>
+      <p>Making "failed in resit" real needed a second fix: a resit sitting that came back with needRetake off
+      was being stamped as <em>clearing</em> the subject even when it failed (e.g. an E), so it would have
+      vanished from the pending lists entirely. New resit entries (single form, PDF import, bulk upload) now
+      carry a "still failing" marker when the resit's own grade is Fail: the superseded attempt is still
+      netted so the higher grade counts toward CGPA, but the subject stays outstanding as a retake. Only newly
+      entered records can carry the marker — 3 historical rows are resolving rows with a Fail grade, and
+      flipping those would have changed real students' status, so they're deliberately untouched.</p>
+      <p>Also fixed along the way: the credit-hour deduction for a resolved subject was applied per resolving
+      row, which would take the hours off twice for a subject that has a failed resit followed later by a
+      passing retake. It's now once per subject (identical to before for every case with one resolving row).
+      The retake-row "Retake?" cell reads "Resit" for a subject waiting on a resit. Assumption to confirm: a
+      C- that came from a <em>retake</em> sitting (not the first-ever sitting) is treated as retake, not
+      resit-eligible.</p>
+      <p>Checked against all 38 real students before and after: CGPA, eligibility, credit totals and the total
+      of outstanding subjects are identical — only how they split between resit and retake is new.</p>
+    </div>
+    <div class="audit-item">
+      <strong>Fixed: PDF import pushed later subjects into the next semester</strong><span class="tag">Fixed</span>
+      <p>Replaces the earlier "last recorded semester + 1" rule, which was wrong: a student sits several
+      subjects per semester, so once the first subject's PDF was imported their last semester was already the
+      current one, and every following subject was pushed a semester ahead. Semester now comes from the exam
+      period (the calendar suggestion), with two refinements: another subject from the <em>same exam
+      period</em> already on file for that student keeps them together (imported records now store which exam
+      period they came from), and a resit result (the CMS "*") stays in the original attempt's semester. If the
+      calendar would leave a gap against what's on file, the row is flagged but still defaults to the calendar
+      value — the Sem box is editable, and the student's remaining subjects follow whatever it's set to.
+      Records imported before this change don't carry an exam period, so the same-period matching only applies
+      to imports from here on.</p>
+    </div>
+    <div class="audit-item">
+      <strong>Semester GPA now follows the first attempt; resits no longer change it</strong><span class="tag">Changed</span>
+      <p>A same-semester resit was being counted in that semester's GPA alongside the original attempt. Semester
+      GPA is now calculated from first attempts only — a resit never changes it. A repeat in a <em>different</em>
+      semester (a retake) is a normal enrolment in that later semester and stays in its GPA. CGPA is a separate,
+      overall figure and is untouched: confirmed identical for all 38 real students. The only numbers that
+      moved are 26 semester GPAs, every one in a semester that contains a same-semester resit (none anywhere
+      else).</p>
+    </div>
+    <div class="audit-item">
+      <strong>New: President's List, Dean's List and Probation, with termination triggers</strong><span class="tag">Added</span>
+      <p>Each semester GPA cell in the intake table is now highlighted by standing — <span style="background:#c9e6c4;padding:0 4px">green</span>
+      President's List (GPA &gt; 3.74), <span style="background:#fff0b3;padding:0 4px">yellow</span> Dean's List (GPA
+      &gt; 3.49, up to 3.74), <span style="background:#f5c6c0;padding:0 4px">red</span> Probation (GPA &lt; 2.00). Both
+      lists need at least 12 credit hours that semester (a 4.00 on 9 credit hours isn't listed); Probation has
+      no minimum. Three rows under the last student give the count for each semester, using the same students
+      and colours as the cells above, so the totals always match what's highlighted. The two lists are
+      mutually exclusive (a 3.80 is President's, not also Dean's) and are judged on the GPA as displayed.
+      Termination triggers are flagged per student (a column in the intake table, a card on the student page,
+      and both exports): GPA below 2.00 for 3 consecutive semesters, or the same subject failed in 3 different
+      semesters. "Pending subjects" and "Repeats needed" are replaced by the resit/retake lists, and the batch
+      header now shows the number of <em>students</em> requiring retake and awaiting resit.</p>
+    </div>
+    <div class="audit-item">
+      <strong>Archiving is now a manual admin choice, not automatic</strong><span class="tag">Changed</span>
+      <p>A batch was previously archived automatically the moment every student in it was Graduated or
+      Withdrawn. Changed to a deliberate choice instead — an "Archive this batch" button in the intake view
+      (admin-only), with "Unarchive this batch" shown once it's archived. The "Show archived" toggle and
+      everything else about how an archived batch behaves is unchanged.</p>
+    </div>
+    <div class="audit-item">
+      <strong>Fixed: a PDF row with a "Barred" grade failed to import at all</strong><span class="tag">Fixed</span>
+      <p>The CMS marks a barred sitting with "BR" in the grade column — a two-letter code the parser's grade
+      pattern didn't recognize at all, rejecting the entire row. Fixed to recognize it specifically: marks are
+      forced to 0 regardless of whatever "Total Marks" the PDF shows for that row (meaningless for a sitting
+      that didn't happen), which then correctly produces 0 grade points through the normal grading table like
+      any other record, needing no separate special case downstream. Also fixed: a dash in the Total FE
+      column (no final-exam component to report) now parses as genuinely missing — shown as "—" — rather than
+      failing to parse at all or being silently treated as a real 0.0.</p>
+    </div>
+    <div class="audit-item">
+      <strong>Fixed: a tiny floating-point residual could show as "1e-7" instead of "—"</strong><span class="tag">Fixed</span>
+      <p>Removed Grade Points entered through the single-result form, the inline Edit form, or a bulk Excel
+      upload (the last one most likely — a spreadsheet formula computing something like 5.01-5.01 can leave a
+      tiny non-zero residual instead of a clean 0) weren't being rounded before being saved. Now rounded to 2
+      decimal places on entry through all three paths, and the display itself also treats anything that
+      rounds to exactly 0 as "—" as a second layer of protection for anything already stored this way.</p>
     </div>
     <div class="audit-item">
       <strong>Fixed a real bug: a subject attempted 3+ times could over-count credit hours in CGPA Temporary</strong><span class="tag">Fixed</span>
@@ -3034,6 +3399,10 @@ function renderAddRecordPreview(plan) {
         // penalizing a worse second sitting. Only when the resit itself
         // fails — a passing resit always counts on its own merits.
         const newOutcome = computeOutcome(finalRec.marks, finalRec.needRetake, finalRec.creditHour, GRADING_TABLE_JUN2026);
+        // A resit that still comes back Fail doesn't clear the subject — it
+        // goes to retake. The superseded attempt is still netted (the higher
+        // grade counts), but this marker stops it counting as cleared.
+        if (newOutcome.achievement === 'Fail') finalRec.stillFailing = true;
         if (newOutcome.achievement === 'Fail' && newOutcome.totalGradePoint < pending.totalGradePoint) {
           finalRec.removedGradePoints = newOutcome.totalGradePoint;
           finalRec.keptHigherPriorGrade = true;
@@ -3095,7 +3464,7 @@ document.addEventListener('DOMContentLoaded', () => {
       creditHour: fd.get('creditHour') ? Number(fd.get('creditHour')) : creditHourFromSubjectCode(subjectCode),
       marks: Number(fd.get('marks')),
       needRetake: fd.get('needRetake') === 'on' ? 1 : 0,
-      removedGradePoints: fd.get('removedGradePoints') ? Number(fd.get('removedGradePoints')) : 0,
+      removedGradePoints: fd.get('removedGradePoints') ? round2(Number(fd.get('removedGradePoints'))) : 0,
       gradingVersion: CURRENT_GRADING_VERSION,
     };
     const validationError = validateRecordInput(rec);
@@ -3591,7 +3960,7 @@ function buildResultsPlan(rawRows) {
       creditHour: p.creditHourRaw !== undefined && p.creditHourRaw !== '' ? Number(p.creditHourRaw) : creditHourFromSubjectCode(p.subjectCode),
       marks: p.marks,
       needRetake: p.needRetakeRaw !== undefined && p.needRetakeRaw !== '' ? (/^y|1|true/i.test(String(p.needRetakeRaw)) ? 1 : 0) : undefined,
-      removedGradePoints: p.removedGradePointsRaw !== undefined && p.removedGradePointsRaw !== '' ? Number(p.removedGradePointsRaw) : undefined,
+      removedGradePoints: p.removedGradePointsRaw !== undefined && p.removedGradePointsRaw !== '' ? round2(Number(p.removedGradePointsRaw)) : undefined,
     };
 
     // Only auto-suggest retake/removed-points when the sheet left them
@@ -3620,6 +3989,7 @@ function buildResultsPlan(rawRows) {
           // worse one. Only when the new sitting itself fails — a pass
           // always counts on its own merits.
           const newOutcome = computeOutcome(record.marks, record.needRetake, record.creditHour, GRADING_TABLE_JUN2026);
+          if (newOutcome.achievement === 'Fail') record.stillFailing = true;
           if (newOutcome.achievement === 'Fail' && newOutcome.totalGradePoint < pending.totalGradePoint) {
             record.removedGradePoints = newOutcome.totalGradePoint;
             record.keptHigherPriorGrade = true;
@@ -3785,7 +4155,11 @@ function parseResultSummaryPDF(rawText) {
     // and fail to match at all. The grade itself can carry a leading "*"
     // (e.g. "*C") — the CMS's own marker that this specific result is a
     // resit, captured separately and stripped before use as a plain grade.
-    const tailMatch = chunk.match(/(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+)\s+(\*)?([A-F][+-]?)\s+(\d+\.\d+)\s+(\d+)/);
+    // Grade also accepts "BR" (Barred) alongside the normal letter grades.
+    // Total FE accepts a non-numeric placeholder (e.g. "-") alongside a
+    // real number — some rows genuinely have no final-exam component to
+    // report (e.g. a barred sitting), as opposed to a real 0.0.
+    const tailMatch = chunk.match(/(\d+\.\d+)\s+(\d+\.\d+|-)\s+(\d+)\s+(\*)?([A-F][+-]?|BR)\s+(\d+\.\d+)\s+(\d+)/);
     if (!tailMatch) {
       errors.push(`Could not read the result fields for ${studentId} — raw text: "${chunk}"`);
       continue;
@@ -3800,18 +4174,30 @@ function parseResultSummaryPDF(rawText) {
     }
     namePart = namePart.replace(/^\d+\s+/, '').trim();
 
+    const isBarred = grade === 'BR';
     rows.push({
       studentId,
       batch: studentId.match(/^[A-Z]+\d{4}/)?.[0] || '',
       name: namePart,
       examStatus,
       totalCW: Number(totalCW),
-      totalFE: Number(totalFE),
-      marks: Number(totalMarks),
-      pdfGrade: grade,
-      pdfGradePoint: Number(gradePoint),
+      // null (not 0) when the PDF shows a placeholder rather than a real
+      // number — kept distinct through to display ("—") rather than
+      // silently becoming a real-looking 0.0; still treated as 0 for any
+      // calculation that touches it, since there's nothing else sensible
+      // to use.
+      totalFE: totalFE === '-' ? null : Number(totalFE),
+      // Barred: marks forced to 0 regardless of whatever Total Marks the
+      // PDF shows — that figure is meaningless for a sitting that didn't
+      // happen, and 0 marks naturally computes to the lowest grade band
+      // (0 points) through the normal grading table, same as any other
+      // record, rather than needing a separate special case downstream.
+      marks: isBarred ? 0 : Number(totalMarks),
+      pdfGrade: isBarred ? 'BR' : grade,
+      pdfGradePoint: isBarred ? 0 : Number(gradePoint),
       attempt: Number(attempt),
       cmsResitMarker: !!resitMark,
+      isBarred,
     });
   }
 
@@ -3854,26 +4240,45 @@ function buildPdfResultsPlan(header) {
   const plan = { items: [], errors: [...header.errors] };
 
   for (const row of header.rows) {
-    // The calendar formula assumes every student in a batch progresses at
-    // the same uniform pace (one semester per ~3 months, no gaps) — wrong
-    // for anyone who's taken a leave of absence or otherwise fallen behind
-    // their batch-mates. Confirmed directly against a real case: a student
-    // with records up through Sem 5 of their own had the calendar formula
-    // jump straight to Sem 7 for this exam period, skipping 6 entirely.
-    // Prefer the student's own history when there is any — their actual
-    // last recorded semester, plus one, is a far more direct signal of
-    // what comes next for THEM specifically than a batch-wide calendar
-    // assumption. Only falls back to the calendar formula for a student
-    // with no prior record at all (nothing to continue from yet).
+    // Semester comes from the exam period (the calendar formula), NOT from
+    // "the student's last recorded semester + 1" — a real bug that was:
+    // a student sits several subjects in one semester, so after the first
+    // subject's PDF is imported their last semester is already this one,
+    // and "+1" then pushed every following subject into the next semester.
+    // Order of precedence:
+    //  1. A resit result (the CMS's "*" marker) with an outstanding prior
+    //     attempt belongs to that attempt's own semester — a resit happens
+    //     in the same semester by definition.
+    //  2. Another subject from this SAME exam period is already on file for
+    //     this student: use that record's semester, so every subject from
+    //     one exam period lands together, including when the first one had
+    //     to be corrected by hand.
+    //  3. Otherwise the calendar suggestion, with a warning if it would
+    //     leave a gap against what's on file (leave of absence, deferred
+    //     semester) — the calendar value is still the default; the Sem box
+    //     is editable and later subjects from this exam period follow
+    //     whatever it's set to (rule 2).
     const calendarSemester = deriveSemesterFromBatchAndPeriod(row.batch, header.examPeriod);
     const existingForStudent = Store.records.filter(r => r.studentId === row.studentId);
-    const studentLastSemester = existingForStudent.length ? Math.max(...existingForStudent.map(r => r.semester)) : null;
-    const semester = studentLastSemester != null ? studentLastSemester + 1 : calendarSemester;
+    const priorPending = findPendingRetake(row.studentId, header.subjectCode);
+    const sameExamRecord = existingForStudent.find(r => r.examPeriod && r.examPeriod === header.examPeriod);
+    let semester, semesterNote = '';
+    if (row.cmsResitMarker && priorPending) {
+      semester = priorPending.semester;
+      if (calendarSemester != null && calendarSemester !== semester) semesterNote = `resit — kept in the original attempt's Sem ${semester} (calendar would say Sem ${calendarSemester})`;
+    } else if (sameExamRecord) {
+      semester = sameExamRecord.semester;
+    } else {
+      semester = calendarSemester;
+      const lastOnFile = existingForStudent.length ? Math.max(...existingForStudent.map(r => r.semester)) : null;
+      if (semester != null && lastOnFile != null && semester > lastOnFile + 1) {
+        semesterNote = `calendar puts this exam period at Sem ${semester}, but this student's records only go up to Sem ${lastOnFile} — if a semester was skipped or deferred, change Sem here`;
+      }
+    }
     if (semester == null) {
       plan.errors.push(`${row.studentId}: couldn't work out which semester this is (batch "${row.batch}", exam period "${header.examPeriod}") — check both look right, or set it manually after importing.`);
       continue;
     }
-    const semesterMismatch = studentLastSemester != null && calendarSemester != null && semester !== calendarSemester;
 
     const validationError = validateRecordInput({ semester, subjectCode: header.subjectCode, creditHour, marks: row.marks });
     if (validationError) { plan.errors.push(`${row.studentId}: ${validationError}`); continue; }
@@ -3933,7 +4338,7 @@ function buildPdfResultsPlan(header) {
       hasOtherSemesterHistory: !!otherSemesterExisting,
       pendingPrior: pendingPrior ? { marks: pendingPrior.marks, grade: pendingPrior.grade, semester: pendingPrior.semester } : null,
       cmsResitMarker: row.cmsResitMarker,
-      semesterMismatch, calendarSemester,
+      semesterNote,
       action: defaultAction,
     });
   }
@@ -3950,6 +4355,9 @@ function buildPdfRecord(header, item) {
     name: item.row.name, studentId: item.row.studentId, batch: item.row.batch,
     semester: item.semester, subjectCode: header.subjectCode, creditHour,
     marks: item.row.marks, needRetake: item.needRetake,
+    // Which exam period this came from — lets another subject from the
+    // same exam period find this record and land in the same semester.
+    examPeriod: header.examPeriod,
   };
   if (item.action === 'resit') {
     // No exclusion here — this action always ADDS a new record rather than
@@ -3967,6 +4375,9 @@ function buildPdfRecord(header, item) {
       // itself fails; a resit that passes always counts on its own merits,
       // same as before.
       const newOutcome = computeOutcome(base.marks, base.needRetake, creditHour, GRADING_TABLE_JUN2026);
+      // Failed in the resit: netted for CGPA, but does not clear the subject
+      // (see the same note on the single-result form).
+      if (newOutcome.achievement === 'Fail') base.stillFailing = true;
       if (newOutcome.achievement === 'Fail' && newOutcome.totalGradePoint < pending.totalGradePoint) {
         base.removedGradePoints = newOutcome.totalGradePoint;
         base.keptHigherPriorGrade = true;
@@ -4009,10 +4420,8 @@ function renderPdfImportPreview(header, plan) {
           : item.hasOtherSemesterHistory ? 'earlier attempt on file, already resolved — not a pending resit' : '';
     // Surfaced separately from contextNote above — this is about whether
     // the semester itself looks right, not about add/update/resit/skip.
-    const semesterNote = item.semesterMismatch
-      ? `⚠ calendar would suggest Sem ${item.calendarSemester}, but this student's own records continue from Sem ${item.semester - 1} — using Sem ${item.semester}; double-check if this looks wrong`
-      : '';
-    const alertStyle = (item.pendingPrior || item.cmsResitMarker || item.semesterMismatch) ? ' style="color:var(--warn);font-weight:600"' : '';
+    const semesterNote = item.semesterNote ? `⚠ ${item.semesterNote}` : '';
+    const alertStyle = (item.pendingPrior || item.cmsResitMarker || item.semesterNote) ? ' style="color:var(--warn);font-weight:600"' : '';
     const gradeDisplay = item.cmsResitMarker ? `*${item.row.pdfGrade}` : item.row.pdfGrade;
     const notesHtml = [semesterNote, contextNote].filter(Boolean).map(n => `<br><span${alertStyle}>${n}</span>`).join('');
     return `<div class="mapping-row" data-pdf-row="${i}">
@@ -4141,7 +4550,9 @@ function exportExcel() {
       row['CGPA Final'] = sum.cgpaFinal;
       row['Eligibility to graduate'] = sum.eligibility;
       row['Number of repeat subject required'] = sum.repeatCount;
-      row['Pending subjects'] = sum.repeatCount ? sum.pendingRetakeSubjects.join(', ') : '';
+      row['Pending resit'] = sum.pendingResitSubjects.join(', ');
+      row['Pending retake'] = sum.pendingRetakeSubjects.join(', ');
+      row['Termination trigger'] = sum.terminationTriggers.join('; ');
       return row;
     });
     const ws = XLSX.utils.json_to_sheet(rows);
@@ -4193,7 +4604,7 @@ function exportPDF(batch) {
     return [
       s.name, s.studentId, STATUS_LABEL[s.status] || 'Active', sum.totalCumGradePoint, sum.totalCumGradePointExclRepeat,
       sum.totalCumCt, sum.totalCumCtExclRepeat, sum.cgpaTemporary ?? '–', sum.cgpaFinal ?? '–',
-      sum.eligibility, sum.repeatCount, sum.repeatCount ? sum.pendingRetakeSubjects.join(', ') : '–',
+      sum.eligibility, sum.pendingResitSubjects.join(', ') || '–', sum.pendingRetakeSubjects.join(', ') || '–', sum.terminationTriggers.join('; ') || '–',
     ];
   });
   doc.setFontSize(14);
@@ -4202,7 +4613,7 @@ function exportPDF(batch) {
   doc.text(`Generated ${new Date().toLocaleDateString()} · withdrawn students excluded`, 14, 21);
   doc.autoTable({
     startY: 26,
-    head: [['Name', 'Student ID', 'Status', 'Total Cum GP', 'Total Cum GP (excl. repeat)', 'Total Cum Ct', 'Total Cum Ct (excl. repeat)', 'CGPA Temp', 'CGPA Final', 'Eligibility', 'Repeats needed', 'Pending subjects']],
+    head: [['Name', 'Student ID', 'Status', 'Total Cum GP', 'Total Cum GP (excl. repeat)', 'Total Cum Ct', 'Total Cum Ct (excl. repeat)', 'CGPA Temp', 'CGPA Final', 'Eligibility', 'Pending resit', 'Pending retake', 'Termination trigger']],
     body: rows,
     styles: { fontSize: 7 },
     headStyles: { fillColor: [217, 234, 211], textColor: [28, 43, 69] },
