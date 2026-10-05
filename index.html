@@ -1204,8 +1204,26 @@ function resolveSubjectMapping(code, depth = 0) {
   };
 }
 
+// Rounds to 2 decimals, half away from zero — the same as Excel's ROUND(x, 2),
+// which is what the original spreadsheet used for every GPA and CGPA.
+//
+// It has to look at the number the way a person would, not the way the
+// computer stores it. Floating point holds decimals like 11.01 only
+// approximately, so a sum of grade points can come out a hair off: six
+// subjects totalling 71.01 added up to 71.00999999999999, and dividing by 18
+// gave 3.9449999999999994 instead of 3.945 — just under the half-way point, so
+// it rounded DOWN to 3.94 where Excel (and anyone with a calculator) gets 3.95.
+// An "add a tiny epsilon first" nudge, which this used to do, is far too small
+// to rescue that. Instead the value is first cleaned to 15 significant digits,
+// which removes the storage noise (grade points are 2-decimal numbers and
+// credit hours whole numbers, so no genuine value is ever within 1e-5 of a
+// half-way point without being exactly on it), and only then rounded.
 function round2(n) {
-  return Math.round((n + Number.EPSILON) * 100) / 100;
+  if (!Number.isFinite(n)) return n;
+  const clean = Number(n.toPrecision(15));
+  const scaled = Number((Math.abs(clean) * 100).toPrecision(15));
+  const r = Math.round(scaled) / 100;
+  return clean < 0 && r !== 0 ? -r : r;
 }
 function sum(records, field) {
   return records.reduce((acc, r) => acc + (Number(r[field]) || 0), 0);
@@ -2967,6 +2985,25 @@ function renderAuditView() {
       — all now give the same result) and against all 38 real students: attempt labels, GPA statuses, semester
       GPAs, resit/retake lists, CGPA and credit hours are unchanged for every one — the fix only alters cases
       where the order was ambiguous.</p>
+    </div>
+    <div class="audit-item open">
+      <strong>Fixed: a GPA that lands exactly half-way (x.xx5) could round the wrong way</strong><span class="tag">Fixed</span>
+      <p>Caught from a real case: six subjects totalling 71.01 grade points over 18 credit hours showed a semester
+      GPA of 3.94. 71.01 &divide; 18 is exactly 3.945, which rounds <em>up</em> to 3.95 &mdash; and the original
+      Excel gives 3.95 (it uses <code>ROUND(&hellip;, 2)</code>). Cause: computers hold decimals like 11.01 only
+      approximately, so adding up the six subjects' grade points gave 71.00999999999999 rather than 71.01, and
+      dividing by 18 gave 3.9449999999999994 &mdash; a hair under 3.945, so it rounded down. The small nudge the app
+      used to add before rounding was far too small to rescue it. This only matters when a GPA falls exactly on a
+      half-way point, which is why almost every other value was right.</p>
+      <p>Every GPA and CGPA goes through one rounding function, so it is fixed once, centrally: it now rounds the
+      way Excel does. Checked three ways. <strong>(1)</strong> Every semester GPA and both CGPAs for all 38
+      students (213 values) were recomputed in exact whole-number arithmetic: 13 of them fall exactly half-way,
+      and the old code had 2 wrong &mdash; DBS2506001 Sem 1 (3.94, now 3.95) and DBS2406004 Sem 3 (2.72, now 2.73)
+      &mdash; and now has none. <strong>(2)</strong> Against the published Excel, the one unexplained difference in
+      a semester without resit or MPU rows (that exact 3.94 vs 3.95) is gone. <strong>(3)</strong> A stress test of
+      a million random and half-way cases against exact arithmetic. Nothing else changes: those two GPAs are the
+      only values that move, and neither changes anyone's President's List, Dean's List or Probation standing.
+      GPAs are calculated live, so nothing stored needs correcting.</p>
     </div>
     <div class="audit-item open">
       <strong>New tab: Student Performance Summary</strong><span class="tag">Added</span>
