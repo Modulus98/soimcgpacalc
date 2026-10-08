@@ -385,6 +385,7 @@
   .stamp.pass{ color:var(--green); border-color:var(--green); background:var(--green-fill); }
   .stamp.caution{ color:var(--amber); border-color:var(--amber); background:var(--amber-fill); }
   .stamp.fail{ color:var(--brick); border-color:var(--brick); background:var(--brick-fill); }
+  .stamp.none{ color:var(--ink-soft); border-color:var(--rule-strong); background:transparent; }
 
   .summary-bar{
     padding:14px 36px 26px; display:flex; gap:22px; flex-wrap:wrap;
@@ -510,6 +511,11 @@
     </div>
     <div class="notice-banner" style="margin-top:10px;">The system is currently in the testing phase.</div>
   </div>
+  <div class="mode-toggle" id="studentAreaNav" role="tablist" aria-label="Section" style="margin:14px 0 4px;">
+    <button type="button" class="mode-btn" role="tab" data-area="main" aria-selected="true">My Results</button>
+    <button type="button" class="mode-btn" role="tab" data-area="game" aria-selected="false">&#127775; Impian Quest</button>
+  </div>
+  <div id="mainArea">
   <div class="mode-toggle" id="studentModeToggle" style="display:none;" role="tablist" aria-label="Report period">
     <button type="button" class="mode-btn" role="tab" data-mode="half" aria-selected="true">Half-Semester</button>
     <button type="button" class="mode-btn" role="tab" data-mode="ongoing" aria-selected="false">Semester Ongoing</button>
@@ -517,6 +523,10 @@
     <button type="button" class="mode-btn" role="tab" data-mode="archived" aria-selected="false">Archived</button>
   </div>
   <div id="studentReportsList"></div>
+  </div>
+  <div id="gameArea" style="display:none;">
+    <iframe id="gameFrame" title="Impian Quest" allow="fullscreen" style="display:block;width:100%;height:calc(100vh - 190px);min-height:540px;border:2px solid var(--rule-strong);border-radius:10px;background:#bfe9ff;margin-top:8px;"></iframe>
+  </div>
 </div>
 
 <!-- Mentee self-view - lets the admin preview their own published mentee
@@ -534,8 +544,17 @@
       </div>
     </div>
   </div>
+  <div class="mode-toggle" id="menteeAreaNav" role="tablist" aria-label="Section" style="margin:14px 0 4px;">
+    <button type="button" class="mode-btn" role="tab" data-area="main" aria-selected="true">My Goals &amp; Progress</button>
+    <button type="button" class="mode-btn" role="tab" data-area="game" aria-selected="false">&#127775; Impian Quest</button>
+  </div>
+  <div id="menteeMainArea">
   <div class="config">
     <div id="menteeSelfViewContent" style="display:grid; gap:12px;">Loading&hellip;</div>
+  </div>
+  </div>
+  <div id="menteeGameArea" style="display:none;">
+    <iframe id="menteeGameFrame" title="Impian Quest" allow="fullscreen" style="display:block;width:100%;height:calc(100vh - 190px);min-height:540px;border:2px solid var(--rule-strong);border-radius:10px;background:#bfe9ff;margin-top:8px;"></iframe>
   </div>
 </div>
 
@@ -3248,6 +3267,26 @@
     if(firebaseAuthInstance) window.firebaseSDK.signOut(firebaseAuthInstance);
   });
 
+  // ---- Impian Quest tab inside the lecturer's previews: the same tab students get. Staff play as a guest. ----
+  function wireGameTab(cfg){
+    var frame = document.getElementById(cfg.frame);
+    function show(area){
+      document.getElementById(cfg.main).style.display = (area === "game") ? "none" : "";
+      document.getElementById(cfg.area).style.display = (area === "game") ? "" : "none";
+      Array.prototype.forEach.call(document.querySelectorAll("#" + cfg.nav + " .mode-btn"), function(b){ b.setAttribute("aria-selected", b.dataset.area === area ? "true" : "false"); });
+      if(area === "game"){
+        if(frame.dataset.loaded !== "1"){ frame.src = "game.html?embed=1&from=admin"; frame.dataset.loaded = "1"; }
+        else { try{ frame.contentWindow.postMessage({ type:"iq-visible" }, location.origin); }catch(e){} }
+        setTimeout(function(){ try{ frame.focus(); }catch(e){} }, 60);
+      }
+    }
+    function reset(){ frame.src = "about:blank"; frame.dataset.loaded = ""; show("main"); }
+    Array.prototype.forEach.call(document.querySelectorAll("#" + cfg.nav + " .mode-btn"), function(b){ b.addEventListener("click", function(){ show(b.dataset.area); }); });
+    cfg.resetOn.forEach(function(id){ var el = document.getElementById(id); if(el) el.addEventListener("click", reset); });
+  }
+  wireGameTab({ nav:"studentAreaNav", main:"mainArea", area:"gameArea", frame:"gameFrame", resetOn:["backToAdminBtn","studentSignOutBtn","viewAsMyStudentBtn"] });
+  wireGameTab({ nav:"menteeAreaNav", main:"menteeMainArea", area:"menteeGameArea", frame:"menteeGameFrame", resetOn:["backToAdminFromMenteeBtn","viewAsMyMenteeBtn"] });
+
   // Lets an admin peek at their own real, Firestore-backed student dashboard
   // without a separate sign-in - safe because the security rule matches on the
   // auth token's email regardless of which provider issued it, so this only ever
@@ -3628,8 +3667,12 @@
     // real 0%/FAILED result, just nothing recorded yet, so show it as such
     // rather than the lowest grade band's letter (which happens to be
     // "FAILED" and reads as an actual failing grade).
-    var hasAnyRecordedMark = (data.marks || []).some(function(m){ return !m.missing; });
-    if(!hasAnyRecordedMark){
+    // The whole report has to be in before an overall grade means anything. A blank assessment is "not published
+    // yet", NOT a zero - so a single missing mark must never flip the stamp to FAILED.
+    var markList = data.marks || [];
+    var enteredCount = markList.filter(function(m){ return !m.missing; }).length;
+    var reportComplete = markList.length > 0 && enteredCount === markList.length;
+    if(!reportComplete){
       stamp.className = "stamp";
       stamp.textContent = "UNPUBLISHED";
     } else {
@@ -3639,7 +3682,8 @@
     gradeRow.appendChild(stamp);
     var pctText = document.createElement("strong");
     pctText.style.marginLeft = "10px";
-    pctText.textContent = hasAnyRecordedMark ? (data.percentage + "%") : "";
+    pctText.textContent = reportComplete ? (data.percentage + "%") : (enteredCount > 0 ? enteredCount + " of " + markList.length + " assessments published" : "");
+    if(!reportComplete){ pctText.style.fontWeight = "400"; pctText.style.fontSize = "13px"; pctText.style.color = "var(--ink-soft)"; }
     gradeRow.appendChild(pctText);
     resultsPanel.appendChild(gradeRow);
 
@@ -3658,7 +3702,7 @@
       var tdWeight = document.createElement("td"); tdWeight.textContent = round1(w) + "%";
       var tdAchieved = document.createElement("td");
       if(m.missing){
-        tdAchieved.textContent = "Not recorded";
+        tdAchieved.textContent = "Unpublished";
       } else {
         var contribution = (m.max > 0) ? (m.value / m.max) * w : 0;
         weightedAchievedSum += contribution;
@@ -3689,7 +3733,7 @@
     }
     if(whatIf) resultsPanel.appendChild(whatIf);
 
-    if(data.feedback && hasAnyRecordedMark){
+    if(data.feedback && (reportComplete || data.grade === "UNPUBLISHED")){   // old FAIL-band wording is hidden; a lecturer's own note on an unpublished report is kept
       var feedbackP = document.createElement("p");
       feedbackP.style.fontStyle = "italic";
       feedbackP.style.marginTop = "12px";
@@ -3835,7 +3879,6 @@
       var menteeBannerHtml = (menteeSnap && menteeSnap.exists && menteeSnap.exists())
         ? '<div class="notice-banner" style="margin-bottom:14px;">You\'re also part of the Mentor Mentee program. <a href="mentoring.html">View your goals &amp; progress \u2192</a></div>'
         : "";
-      menteeBannerHtml = '<div class="notice-banner" style="margin-bottom:14px;">\uD83C\uDF1F New: <b>Impian Quest</b> \u2014 answer questions to earn wishes and explore Malaysia with cute friends. <a href="game.html">Play \u2192</a></div>' + menteeBannerHtml;
 
       if(snapshot.empty){
         container.innerHTML = menteeBannerHtml + '<p class="card-hint">No results have been published for you yet. Check back after your lecturer releases them.</p>';
@@ -6192,6 +6235,15 @@
     return ratios.some(function(r){ return Math.abs(r - ratios[0]) > 0.0001; });
   }
 
+  // A student with NOTHING recorded yet (no assessments, or every cell blank) has no result to grade. Calling that
+  // "FAILED 0%" is wrong - it simply isn't published yet - so the grade object itself says so, and every screen,
+  // export, PDF and email that prints grade.letter follows automatically. (A blank is "not published yet", never a
+  // zero: until EVERY assessment has a mark the student stays unpublished.)
+  var UNPUBLISHED_GRADE = { min:-Infinity, letter:"UNPUBLISHED", key:"UNPUB", tier:"none" };
+  function isFullyRecorded(marks){ return (marks || []).length > 0 && marks.every(function(m){ return !m.missing; }); }
+  function gradeRank(g){ var i = GRADE_ORDER.indexOf(g.key); return i < 0 ? 999 : i; }   // unpublished sorts last
+  function gradeSummary(s){ return s.grade.key === "UNPUB" ? s.grade.letter : s.grade.letter + " (" + round1(s.pct) + "%)"; }
+
   function computeStudentsForProfile(profile){
     var maxTotal = totalMaxMarks(profile);
     var weightSum = totalWeight(profile);
@@ -6221,8 +6273,10 @@
       // diverges when weights genuinely differ from max marks (e.g. a raw-out-of-100
       // final exam that's only worth 40% of the grade).
       var pct = weightSum > 0 ? (weightedSum / weightSum) * 100 : 0;
-      var grade = gradeForPercentage(pct);
-      students.push({ id:id, name:name, email:email, marks:marks, achieved:achieved, maxTotal:maxTotal, pct:pct, grade:grade, missing:missing });
+      var entered = marks.filter(function(mk){ return !mk.missing; }).length;
+      var recorded = isFullyRecorded(marks);   // every assessment has a mark; a blank is "unpublished", never a zero
+      var grade = recorded ? gradeForPercentage(pct) : UNPUBLISHED_GRADE;
+      students.push({ id:id, name:name, email:email, marks:marks, achieved:achieved, maxTotal:maxTotal, pct:pct, grade:grade, missing:missing, recorded:recorded, entered:entered, totalAssess:marks.length });
     }
     profile.students = students;
   }
@@ -6599,7 +6653,7 @@
       if(key === "name"){ av=a.name.toLowerCase(); bv=b.name.toLowerCase(); }
       else if(key === "id"){ av=a.id.toLowerCase(); bv=b.id.toLowerCase(); }
       else if(key === "pct"){ av=a.pct; bv=b.pct; }
-      else if(key === "grade"){ av=GRADE_ORDER.indexOf(a.grade.key); bv=GRADE_ORDER.indexOf(b.grade.key); }
+      else if(key === "grade"){ av=gradeRank(a.grade); bv=gradeRank(b.grade); }
       else { av=a.name.toLowerCase(); bv=b.name.toLowerCase(); }
       if(av<bv) return -1*dir;
       if(av>bv) return 1*dir;
@@ -6686,7 +6740,7 @@
 
       var tdPct = document.createElement("td");
       tdPct.classList.add("num");
-      tdPct.textContent = round1(s.pct) + "%";
+      tdPct.textContent = s.grade.key === "UNPUB" ? (s.entered ? s.entered + " of " + s.totalAssess + " entered" : "\u2014") : round1(s.pct) + "%";
       tr.appendChild(tdPct);
 
       var tdGrade = document.createElement("td");
@@ -6749,11 +6803,12 @@
 
     if(!profile.students.length){ return; }
     var n = profile.students.length;
-    var avg = profile.students.reduce(function(s,st){ return s+st.pct; },0) / n;
-    var failing = profile.students.filter(function(s){ return s.grade.key === "FAIL"; }).length;
+    var recordedList = profile.students.filter(function(s){ return s.grade.key !== "UNPUB"; }), nu = n - recordedList.length;
+    var avg = recordedList.length ? recordedList.reduce(function(s,st){ return s+st.pct; },0) / recordedList.length : 0;
+    var failing = recordedList.filter(function(s){ return s.grade.key === "FAIL"; }).length;
     var tierCounts = {};
     GRADE_ORDER.forEach(function(k){ tierCounts[k]=0; });
-    profile.students.forEach(function(s){ tierCounts[s.grade.key]++; });
+    recordedList.forEach(function(s){ tierCounts[s.grade.key]++; });
 
     function stat(label, value){
       var d = document.createElement("div");
@@ -6765,6 +6820,7 @@
     stat("students", n);
     stat("class average", round1(avg) + "%");
     stat("failing", failing);
+    if(nu) stat("unpublished", nu);
     var dist = document.createElement("div");
     dist.textContent = GRADE_ORDER.map(function(k){ return k + ":" + tierCounts[k]; }).join("  \u00b7  ");
     bar.appendChild(dist);
@@ -6779,7 +6835,7 @@
       s.marks.forEach(function(m){ row[m.name + " (/" + m.max + ")"] = m.missing ? "" : m.value; });
       row["Total"] = round1(s.achieved);
       row["Max"] = s.maxTotal;
-      row["Percentage"] = round1(s.pct);
+      row["Percentage"] = s.grade.key === "UNPUB" ? "" : round1(s.pct);
       row["Grade"] = s.grade.letter;
       row["Feedback"] = feedbackTextFor(profile, s);
       return row;
@@ -6827,12 +6883,14 @@
     if(tier === "honors") return [138,106,22];
     if(tier === "pass") return [47,93,63];
     if(tier === "caution") return [146,86,27];
+    if(tier === "none") return [110,100,120];
     return [166,61,46];
   }
   function tierFill(tier){
     if(tier === "honors") return [247,239,217];
     if(tier === "pass") return [231,239,225];
     if(tier === "caution") return [245,230,211];
+    if(tier === "none") return [238,236,240];
     return [246,222,218];
   }
 
@@ -6887,7 +6945,7 @@
     var body = student.marks.map(function(m){
       var w = (m.weight != null ? m.weight : m.max) || 0;
       pdfWeightSum += w;
-      if(m.missing) return [m.name, round1(w) + "%", "Not recorded"];
+      if(m.missing) return [m.name, round1(w) + "%", "Unpublished"];
       var contribution = (m.max > 0) ? (m.value / m.max) * w : 0;
       pdfWeightedAchieved += contribution;
       // Masking is opt-in per assessment (the checkbox in step 2), not inferred
@@ -6931,7 +6989,7 @@
     doc.setFont("helvetica","bold");
     doc.setFontSize(13);
     doc.setTextColor(30,58,44);
-    doc.text((Math.round(student.pct*10)/10) + "%", margin + boxW + 20, y + 5);
+    doc.text(student.grade.key === "UNPUB" ? "" : (Math.round(student.pct*10)/10) + "%", margin + boxW + 20, y + 5);
 
     y += 36;
     doc.setFont("courier","bold");
@@ -7131,6 +7189,7 @@
 
   function generateFeedbackForOne(student, btn){
     if(!claudeApiKey.trim()){ setAiFeedbackStatus("Paste your AI API key above first.", "warn"); return; }
+    if(student.grade.key === "UNPUB"){ setAiFeedbackStatus(student.name + " has no results recorded yet, so there is nothing to comment on.", "warn"); return; }
     var profile = cur();
     var model = document.getElementById("aiModelSelect").value;
     var pill = aiNoteStatusPills[student.id];
@@ -7156,7 +7215,7 @@
     if(!profile.students.length){ setAiFeedbackStatus("Load a marksheet first.", "warn"); return; }
 
     var model = document.getElementById("aiModelSelect").value;
-    var todo = profile.students.filter(function(s){ return !profile.aiFeedback[s.id]; });
+    var todo = profile.students.filter(function(s){ return !profile.aiFeedback[s.id] && s.grade.key !== "UNPUB"; });   // nothing to comment on yet
     if(!todo.length){ setAiFeedbackStatus("Every current student already has generated feedback. Use \u201cRegenerate\u201d on a row, or \u201cClear generated feedback\u201d to start over.", "info"); return; }
 
     var btn = this;
@@ -7570,7 +7629,7 @@
     document.getElementById("emailPreviewTitle").textContent = student.name || "(no name)";
     document.getElementById("emailPreviewSub").textContent =
       "Student " + (emailPreviewState.index+1) + " of " + emailPreviewState.list.length +
-      (student.id ? "  \u00b7  ID " + student.id : "") + "  \u00b7  " + student.grade.letter + " (" + round1(student.pct) + "%)";
+      (student.id ? "  \u00b7  ID " + student.id : "") + "  \u00b7  " + gradeSummary(student);
     document.getElementById("emailPreviewTo").textContent = student.email || "(no email address found for this student)";
     document.getElementById("emailPreviewSubject").textContent = subject;
     document.getElementById("emailPreviewBody").textContent = body;
@@ -7735,7 +7794,7 @@
     document.getElementById("previewTitle").textContent = s.name || "(no name)";
     document.getElementById("previewSub").textContent =
       "Student " + (previewState.index+1) + " of " + previewState.list.length +
-      (s.id ? "  \u00b7  ID " + s.id : "") + "  \u00b7  " + s.grade.letter + " (" + round1(s.pct) + "%)";
+      (s.id ? "  \u00b7  ID " + s.id : "") + "  \u00b7  " + gradeSummary(s);
 
     if(previewState.blobUrl){ URL.revokeObjectURL(previewState.blobUrl); previewState.blobUrl = null; }
 

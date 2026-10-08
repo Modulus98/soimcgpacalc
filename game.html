@@ -22,6 +22,7 @@
   .box{ background:var(--card); border-radius:26px; padding:22px; max-width:600px; width:100%; box-shadow:0 8px 0 rgba(0,0,0,.12), 0 0 0 5px #fff inset; text-align:center; max-height:94vh; overflow:auto; }
   input[type=text]{ font:inherit; padding:10px 14px; border-radius:14px; border:3px solid #e6d6f5; width:100%; text-align:center; color:var(--ink); }
   body.embed .noembed{ display:none !important; }
+  body.embed:not(.staff) .noembed-guest{ display:none !important; }   /* students never need it inside a dashboard; staff (email/password) can only play as a guest */
   .status{ min-height:1.3em; font-size:14px; margin-top:8px; color:#a63d2e; }
   .status.info{ color:#4b6156; }
   .starters{ display:flex; gap:10px; justify-content:center; margin:14px 0; flex-wrap:wrap; }
@@ -142,7 +143,7 @@
     <p class="note">Explore Malaysia, meet cute friends and make a wish &mdash; every correct answer earns a wish!</p>
     <div style="display:grid;gap:10px;margin-top:14px;">
       <button class="btn" id="btnGoogle">Sign in with Google (use my class questions)</button>
-      <button class="btn ghost noembed" id="btnGuest">Play as guest (saved on this device only)</button>
+      <button class="btn ghost noembed-guest" id="btnGuest">Play as guest (saved on this device only)</button>
       <a class="noembed" href="report.html" style="color:#7a6a88;font-size:14px;">&larr; Back to my results</a>
     </div>
     <div class="status" id="loginStatus"></div>
@@ -219,6 +220,7 @@ var $ = function(id){ return document.getElementById(id); };
 // and nobody is asked to sign in twice. Opened directly, it shares report.html's (default) app.
 var QS = new URLSearchParams(location.search), EMBED = QS.get('embed')==='1', FROM = QS.get('from')||'';
 if(EMBED) document.body.classList.add('embed');
+if(FROM==='admin') document.body.classList.add('staff');
 var rnd = Math.random;
 var rint = function(a,b){ return a + Math.floor(rnd()*(b-a+1)); };
 var pick = function(a){ return a[Math.floor(rnd()*a.length)]; };
