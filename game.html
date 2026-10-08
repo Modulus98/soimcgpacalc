@@ -21,6 +21,7 @@
   .screen.show{ display:flex; }
   .box{ background:var(--card); border-radius:26px; padding:22px; max-width:600px; width:100%; box-shadow:0 8px 0 rgba(0,0,0,.12), 0 0 0 5px #fff inset; text-align:center; max-height:94vh; overflow:auto; }
   input[type=text]{ font:inherit; padding:10px 14px; border-radius:14px; border:3px solid #e6d6f5; width:100%; text-align:center; color:var(--ink); }
+  body.embed .noembed{ display:none !important; }
   .status{ min-height:1.3em; font-size:14px; margin-top:8px; color:#a63d2e; }
   .status.info{ color:#4b6156; }
   .starters{ display:flex; gap:10px; justify-content:center; margin:14px 0; flex-wrap:wrap; }
@@ -35,11 +36,12 @@
   #gameScreen.show{ display:block; }
   #cv{ position:absolute; inset:0; width:100%; height:100%; touch-action:none; }
   .hud{ position:absolute; z-index:5; }
-  #partyBar{ left:10px; top:10px; display:flex; flex-direction:column; gap:6px; }
-  .pm{ display:flex; align-items:center; gap:6px; background:#ffffffe6; border-radius:16px; padding:3px 10px 3px 4px; box-shadow:0 3px 0 rgba(0,0,0,.12); border:3px solid transparent; min-width:136px; cursor:pointer; }
+  #partyBar{ left:10px; top:128px; display:flex; flex-direction:column; gap:6px; }
+  .pm{ display:flex; align-items:center; gap:7px; background:#ffffffe6; border-radius:999px 16px 16px 999px; padding:3px 10px 3px 3px; box-shadow:0 3px 0 rgba(0,0,0,.12); border:3px solid transparent; min-width:136px; cursor:pointer; }
   .pm.act{ border-color:var(--pink); }
   .pm.down{ opacity:.45; filter:grayscale(1); }
-  .pm img{ width:32px; height:44px; object-fit:contain; }
+  .pm img{ width:46px; height:46px; flex:none; border-radius:50%; background:#fff; border:3px solid var(--pink); object-fit:cover; box-shadow:0 2px 0 rgba(0,0,0,.15); }
+  .pm.act img{ width:50px; height:50px; }
   .pm .nm{ font-size:12px; font-weight:600; line-height:1.1; }
   .pm .hpb{ height:7px; width:80px; background:#e8dff2; border-radius:6px; overflow:hidden; margin-top:3px; }
   .pm .hpb i{ display:block; height:100%; background:linear-gradient(90deg,#6ee7a8,#2fbf71); }
@@ -58,6 +60,24 @@
   body.touch #helpHint{ display:none; }
   #toast{ position:absolute; left:50%; top:70px; transform:translateX(-50%); background:#3b2a4aee; color:#fff; padding:9px 18px; border-radius:18px; z-index:30; font-weight:500; opacity:0; transition:opacity .35s; pointer-events:none; max-width:86vw; text-align:center; }
   #toast.show{ opacity:1; }
+
+  /* ---- minimap (top-left) ---- */
+  #miniMap{ left:10px; top:10px; width:150px; height:105px; border-radius:18px; border:3px solid #fff; box-shadow:0 4px 0 rgba(0,0,0,.18); overflow:hidden; cursor:pointer; background:#7fd3ff; padding:0; }
+  #miniMap canvas{ width:100%; height:100%; display:block; }
+  #miniMap .mmLabel{ position:absolute; left:6px; bottom:4px; font-size:11px; font-weight:600; background:#ffffffd9; border-radius:8px; padding:1px 7px; pointer-events:none; color:var(--ink); }
+  @media (max-width:640px){ #miniMap{ width:112px; height:78px; } #partyBar{ top:100px; } }
+  /* ---- world map panel ---- */
+  #mapWrap{ position:relative; width:100%; max-width:680px; margin:8px auto; }
+  #mapWrap canvas{ width:100%; display:block; border-radius:16px; border:4px solid #fff; box-shadow:0 4px 0 rgba(0,0,0,.15); }
+  .rl{ position:absolute; transform:translate(-50%,-50%); font-weight:700; font-size:13px; color:#fff; text-shadow:0 1px 3px #000b; pointer-events:none; white-space:nowrap; }
+  .wp{ position:absolute; transform:translate(-50%,-50%); width:32px; height:32px; border-radius:50%; border:3px solid #fff; background:var(--gold); box-shadow:0 3px 0 rgba(0,0,0,.3); font-size:15px; line-height:1; padding:0; cursor:pointer; color:#5a3b00; }
+  .wp.sel{ outline:4px solid var(--pink); }
+  .wp.lock{ background:#b9b2c4; color:#fff; }
+  .you{ position:absolute; transform:translate(-50%,-100%); font-size:22px; pointer-events:none; filter:drop-shadow(0 2px 0 #0006); }
+  /* ---- reviving / teleporting ---- */
+  #wipeOv{ position:fixed; inset:0; background:#2a1a3acc; display:none; align-items:center; justify-content:center; z-index:35; color:#fff; text-align:center; font-weight:600; font-size:17px; line-height:1.5; }
+  #wipeOv.show{ display:flex; } #wipeOv big{ display:block; font-size:28px; margin:6px 0 4px; }
+  #fadeOv{ position:fixed; inset:0; background:#fff; opacity:0; pointer-events:none; transition:opacity .35s; z-index:36; } #fadeOv.on{ opacity:1; }
 
   /* ---- panels ---- */
   #panel{ position:fixed; inset:0; background:#2a1a3a88; display:none; align-items:center; justify-content:center; padding:12px; z-index:40; }
@@ -122,8 +142,8 @@
     <p class="note">Explore Malaysia, meet cute friends and make a wish &mdash; every correct answer earns a wish!</p>
     <div style="display:grid;gap:10px;margin-top:14px;">
       <button class="btn" id="btnGoogle">Sign in with Google (use my class questions)</button>
-      <button class="btn ghost" id="btnGuest">Play as guest (saved on this device only)</button>
-      <a href="report.html" style="color:#7a6a88;font-size:14px;">&larr; Back to my results</a>
+      <button class="btn ghost noembed" id="btnGuest">Play as guest (saved on this device only)</button>
+      <a class="noembed" href="report.html" style="color:#7a6a88;font-size:14px;">&larr; Back to my results</a>
     </div>
     <div class="status" id="loginStatus"></div>
   </div>
@@ -143,6 +163,7 @@
 
 <div id="gameScreen">
   <canvas id="cv"></canvas>
+  <button class="hud" id="miniMap" type="button" aria-label="Open the world map (M)" title="World map (M)"><canvas id="miniCv" width="150" height="105"></canvas><span class="mmLabel">&#128506;&#65039; Map</span></button>
   <div class="hud" id="partyBar"></div>
   <div class="hud" id="zoneLabel"></div>
   <div class="hud" id="topRight">
@@ -158,12 +179,14 @@
     <button class="btn round alt" id="bSkill">&#10024;<small id="skcd"></small></button>
     <button class="btn round" id="bAtk">&#9876;&#65039;</button>
   </div>
-  <div class="hud" id="helpHint">WASD / arrows: move &middot; Space: attack &middot; E: skill &middot; 1-4: switch friend</div>
+  <div class="hud" id="helpHint">WASD / arrows: move &middot; Space: attack &middot; E: skill &middot; 1-4: switch friend &middot; M: map</div>
   <div id="toast"></div>
 </div>
 
 <div id="panel"><div id="sheet"></div></div>
 <div id="wishOv"></div>
+<div id="wipeOv"><div id="wipeMsg"></div></div>
+<div id="fadeOv"></div>
 
 <!-- Firebase SDK bridge (same pattern as mentoring.html) -->
 <script type="module">
@@ -190,6 +213,12 @@ var FIREBASE_CONFIG = {
 };
 
 var $ = function(id){ return document.getElementById(id); };
+
+// Inside a dashboard (report / mentoring) the game runs in an iframe with ?embed=1&from=<page>.
+// It then uses the SAME Firebase app name as that page, so the student's existing Google sign-in is shared
+// and nobody is asked to sign in twice. Opened directly, it shares report.html's (default) app.
+var QS = new URLSearchParams(location.search), EMBED = QS.get('embed')==='1', FROM = QS.get('from')||'';
+if(EMBED) document.body.classList.add('embed');
 var rnd = Math.random;
 var rint = function(a,b){ return a + Math.floor(rnd()*(b-a+1)); };
 var pick = function(a){ return a[Math.floor(rnd()*a.length)]; };
@@ -245,6 +274,7 @@ function toURI(svg){ return 'data:image/svg+xml;utf8,'+encodeURIComponent(svg); 
 function uri(kind,id){
   var k=kind+id; if(URI_CACHE[k]) return URI_CACHE[k];
   if(kind==='c') return (URI_CACHE[k]=CHARS[id].img);
+  if(kind==='f') return (URI_CACHE[k]='chars/'+id+'_face.webp');   // square face portrait, for small round avatars
   var svg = kind==='m' ? monsterSVG(id) : weaponSVG(id);
   return (URI_CACHE[k]=toURI(svg));
 }
@@ -408,7 +438,7 @@ function newSave(name,starter){
   o[starter]={c:0};
   var eq={}; eq[starter]='rotan';
   return { v:1, name:name, created:Date.now(), wishes:0, totalPulls:0, chars:o, party:[starter], weapons:{ rotan:{r:1} }, equip:eq,
-    pity:{ char:{n5:0,n4:0,g:false}, weap:{n5:0,n4:0,g:false} }, solved:{}, locked:{}, daily:{d:'',n:0}, ar:1, xp:0, kills:0, pos:null, hist:[] };
+    pity:{ char:{n5:0,n4:0,g:false}, weap:{n5:0,n4:0,g:false} }, solved:{}, locked:{}, daily:{d:'',n:0}, wp:{}, ar:1, xp:0, kills:0, pos:null, hist:[] };
 }
 function sanitize(s){
   if(!s||typeof s!=='object') return null;
@@ -610,12 +640,120 @@ function charStats(id){
   return { atk:(c.atk+S.ar*1.5+(w?w.atk*(1+0.12*(wr-1)):0))*cons, hp:Math.round((c.hp+S.ar*7)*cons), bonus:w?w.bonus*(1+0.2*(wr-1)):0 };
 }
 function activeId(){ return S.party[G.active]; }
+// =====================================================================
+// REVIVING, WORLD MAP & WAYPOINTS
+// =====================================================================
+// A friend who falls asleep wakes up by themselves; a full wipe wakes everyone at the nearest waypoint.
+// Nothing restarts: progress, kills and monster damage are all kept.
+var REVIVE_SOLO_SEC=18, REVIVE_SOLO_HP=0.5, WIPE_SEC=3.5, WIPE_HP=0.6;
+var MAPCFG = {
+  openAllWaypoints:true,          // true: every waypoint can be used from the start.  false: walk close to one once to unlock it (Kuala Lumpur is always open)
+  sealUnreleasedRegions:false,    // true: regions whose version is newer than RELEASE.version show as "mist-sealed" and can't be travelled to
+  regionVersion:{ 0:'0.0', 1:'0.0', 2:'0.1', 3:'0.2' }
+};
+var WAYPOINT_DEFS=[
+  { id:'kl',      name:'Twin Beacons Crossing', zone:0, tx:21, ty:16 },
+  { id:'penang',  name:'Hawker Lanes',          zone:1, tx:47, ty:19 },
+  { id:'cameron', name:'Tea Terrace Lookout',   zone:2, tx:30, ty:38 },
+  { id:'borneo',  name:'Rainforest Landing',    zone:3, tx:62, ty:40 }
+];
+var WPS=[], worldImg=null, mapSel=null;
+// snap a wished-for tile to the nearest ground the player can really stand on and walk to
+function nearestStandable(tx,ty){
+  var best=null, bd=1e9;
+  for(var r=0;r<=14 && !best;r++){
+    for(var dy=-r;dy<=r;dy++) for(var dx=-r;dx<=r;dx++){
+      if(Math.max(Math.abs(dx),Math.abs(dy))!==r) continue;
+      var x=tx+dx, y=ty+dy; if(x<0||y<0||x>=MW||y>=MH) continue;
+      if(!reach[y*MW+x] || !canStand((x+0.5)*TS,(y+0.5)*TS,11)) continue;
+      var d=dx*dx+dy*dy; if(d<bd){ bd=d; best={ x:(x+0.5)*TS, y:(y+0.5)*TS, tx:x, ty:y }; }
+    }
+  }
+  return best;
+}
+function buildWaypoints(){
+  WPS=WAYPOINT_DEFS.map(function(d){ var p=nearestStandable(d.tx,d.ty)||{ x:(SPAWN.x+0.5)*TS, y:(SPAWN.y+0.5)*TS, tx:SPAWN.x, ty:SPAWN.y }; return { id:d.id, name:d.name, zone:d.zone, x:p.x, y:p.y, tx:p.tx, ty:p.ty }; });
+}
+function wpSealedReason(w){ var v=MAPCFG.regionVersion[w.zone]; return (MAPCFG.sealUnreleasedRegions && v && parseFloat(v)>parseFloat(RELEASE.version)) ? 'Mist-sealed until Version '+v : ''; }
+function wpUnlocked(w){ return !!(S.wp && S.wp[w.id]); }
+function unlockNearbyWaypoints(){
+  var p=G.p, changed=false;
+  WPS.forEach(function(w){ if(!S.wp[w.id] && Math.hypot(w.x-p.x,w.y-p.y)<TS*5){ S.wp[w.id]=true; changed=true; toast('Waypoint unlocked: '+w.name); } });
+  if(changed) markDirty();
+}
+function nearestWaypoint(x,y){
+  var best=null, bd=1e18;
+  WPS.forEach(function(w){ if(!wpUnlocked(w)||wpSealedReason(w)) return; var d=(w.x-x)*(w.x-x)+(w.y-y)*(w.y-y); if(d<bd){ bd=d; best=w; } });
+  return best||WPS[0];
+}
+var TILE_COL={}; TILE_COL[T.GRASS]='#9ee493'; TILE_COL[T.FOREST]='#4fae61'; TILE_COL[T.ROAD]='#cfc9dc'; TILE_COL[T.WATER]='#5ab8ff'; TILE_COL[T.SAND]='#f6e2a8'; TILE_COL[T.TREE]='#2f9a58';
+TILE_COL[T.BUILD]='#e59ab5'; TILE_COL[T.TEA]='#78c963'; TILE_COL[T.ROCK]='#8d86a0'; TILE_COL[T.PLAZA]='#f1e6d3'; TILE_COL[T.BRIDGE]='#c58b5c'; TILE_COL[T.FLOWER]='#ffb3cf';
+function buildWorldImg(){
+  if(worldImg) return worldImg;
+  var c=document.createElement('canvas'); c.width=MW*8; c.height=MH*8; var g=c.getContext('2d');
+  for(var y=0;y<MH;y++) for(var x=0;x<MW;x++){ g.fillStyle=TILE_COL[map[y*MW+x]]||'#9ee493'; g.fillRect(x*8,y*8,8,8); }
+  g.strokeStyle='#ffffffaa'; g.lineWidth=2; g.setLineDash([8,6]); g.beginPath(); g.moveTo(40*8,0); g.lineTo(40*8,MH*8); g.moveTo(0,28*8); g.lineTo(MW*8,28*8); g.stroke(); g.setLineDash([]);   // the four regions
+  return (worldImg=c);
+}
+function drawMiniMap(){
+  var c2=$('miniCv'); if(!c2||!map||!G) return;
+  var g=c2.getContext('2d'), w=c2.width, h=c2.height;
+  g.drawImage(buildWorldImg(),0,0,w,h);
+  WPS.forEach(function(wp){ if(!wpUnlocked(wp)) return; var x=wp.x/(MW*TS)*w, y=wp.y/(MH*TS)*h; g.fillStyle='#ffc83d'; g.strokeStyle='#fff'; g.lineWidth=1.5; g.beginPath(); g.moveTo(x,y-5); g.lineTo(x+4,y); g.lineTo(x,y+5); g.lineTo(x-4,y); g.closePath(); g.fill(); g.stroke(); });
+  var px=G.p.x/(MW*TS)*w, py=G.p.y/(MH*TS)*h; g.fillStyle='#ff4d8d'; g.strokeStyle='#fff'; g.lineWidth=2; g.beginPath(); g.arc(px,py,4,0,6.3); g.fill(); g.stroke();
+}
+function openMap(){
+  if(!G||G.wipe) return;
+  var pct=function(v,m){ return (v/m*100).toFixed(2)+'%'; };
+  var labels=[['Kuala Lumpur',20,3],['Penang',60,3],['Cameron Highlands',20,31],['Borneo Rainforest',58,31]].map(function(l){ return '<span class="rl" style="left:'+pct(l[1],MW)+';top:'+pct(l[2],MH)+'">'+l[0]+'</span>'; }).join('');
+  var pins=WPS.map(function(w){ var open=wpUnlocked(w)&&!wpSealedReason(w); return '<button class="wp'+(open?'':' lock')+'" data-w="'+w.id+'" aria-label="'+esc(w.name)+'" style="left:'+pct(w.x,MW*TS)+';top:'+pct(w.y,MH*TS)+'">'+(open?'\u25C6':'\uD83D\uDD12')+'</button>'; }).join('');
+  var you='<span class="you" style="left:'+pct(G.p.x,MW*TS)+';top:'+pct(G.p.y,MH*TS)+'">\uD83D\uDCCD</span>';
+  openPanel('<h2>\uD83D\uDDFA\uFE0F World Map</h2><div id="mapWrap"><canvas id="bigMap" width="'+(MW*8)+'" height="'+(MH*8)+'"></canvas>'+labels+pins+you+'</div><div class="detail" id="wpInfo">Tap a diamond to choose where to go. \uD83D\uDCCD is you.</div><div style="text-align:center;margin-top:10px"><button class="btn gold" id="wpGo" disabled>Teleport</button></div>');
+  $('bigMap').getContext('2d').drawImage(buildWorldImg(),0,0);
+  mapSel=null;
+  Array.prototype.forEach.call($('sheet').querySelectorAll('.wp'),function(b){ b.onclick=function(){ selectWaypoint(b.dataset.w); }; });
+  $('wpGo').onclick=function(){ if(mapSel) teleportTo(mapSel); };
+}
+function selectWaypoint(id){
+  var w=WPS.filter(function(x){ return x.id===id; })[0]; if(!w) return; mapSel=id;
+  Array.prototype.forEach.call($('sheet').querySelectorAll('.wp'),function(b){ b.classList.toggle('sel',b.dataset.w===id); });
+  var sealed=wpSealedReason(w), here=Math.hypot(w.x-G.p.x,w.y-G.p.y)<TS*3, msg, can=false;
+  if(sealed) msg=esc(sealed)+'.'; else if(!wpUnlocked(w)) msg='Walk close to this waypoint once to unlock it.'; else if(here) msg='You are already here.'; else { msg='Ready to go.'; can=true; }
+  $('wpInfo').innerHTML='<b>'+esc(w.name)+'</b> \u00b7 '+ZONES[w.zone]+'<br>'+msg;
+  $('wpGo').disabled=!can; $('wpGo').textContent=can?'Teleport to '+w.name:'Teleport';
+}
+function moveTo(x,y){ var p=G.p; p.x=x; p.y=y; p.inv=1.2; p.moving=false; G.fx.length=0; G.calm=0; G.zone=-1; S.pos={ x:Math.round(x), y:Math.round(y) }; markDirty(); }
+function teleportTo(id,instant){
+  var w=WPS.filter(function(x){ return x.id===id; })[0];
+  if(!w||!wpUnlocked(w)||wpSealedReason(w)) return false;
+  closePanel(); G.p.inv=1.2;
+  function go(){ moveTo(w.x,w.y); toast('\uD83D\uDCCD '+w.name); updateHUD(true); }
+  if(instant){ go(); return true; }
+  var f=$('fadeOv'); f.className='on'; setTimeout(function(){ go(); f.className=''; },380);
+  return true;
+}
+function reviveMember(id,frac,quiet){ delete G.down[id]; G.hp[id]=Math.max(1,Math.round(charStats(id).hp*frac)); if(!quiet) toast(CHARS[id].name+' woke up!'); }
+function startWipe(){
+  var wp=nearestWaypoint(G.p.x,G.p.y); G.wipe={ t:WIPE_SEC, wp:wp.id };
+  $('wipeMsg').innerHTML='\uD83D\uDCA4<big>Everyone is sleepy\u2026</big>Waking up at <b>'+esc(wp.name)+'</b>';
+  $('wipeOv').className='show';
+}
+function finishWipe(){
+  var wp=WPS.filter(function(w){ return w.id===G.wipe.wp; })[0]||nearestWaypoint(G.p.x,G.p.y);
+  S.party.forEach(function(id){ reviveMember(id,WIPE_HP,true); });
+  G.active=0; G.wipe=null; $('wipeOv').className='';
+  moveTo(wp.x,wp.y); toast('Everyone woke up at '+wp.name+'. Your progress is kept \u2014 monsters stay as you left them.'); updateHUD(true);
+}
+
 function newGame(){
   if(!map){ map=genMap(); reach=computeReach(); }
+  if(!WPS.length) buildWaypoints();
   var px=S.pos?S.pos.x:(SPAWN.x+0.5)*TS, py=S.pos?S.pos.y:(SPAWN.y+0.5)*TS;
   if(!canStand(px,py,11)){ px=(SPAWN.x+0.5)*TS; py=(SPAWN.y+0.5)*TS; }
-  G={ p:{x:px,y:py,fx:1,fy:0,atkCD:0,skCD:0,inv:0,bob:0,moving:false,flip:1,swapCD:0}, active:0, hp:{}, mons:[], pickups:[], fx:[], cam:{x:0,y:0}, zone:-1, calm:0, t:0 };
+  G={ p:{x:px,y:py,fx:1,fy:0,atkCD:0,skCD:0,inv:0,bob:0,moving:false,flip:1,swapCD:0}, active:0, hp:{}, down:{}, wipe:null, mons:[], pickups:[], fx:[], cam:{x:0,y:0}, zone:-1, calm:0, t:0 };
   S.party.forEach(function(id){ G.hp[id]=charStats(id).hp; });
+  if(!S.wp) S.wp={};
+  WPS.forEach(function(w){ if(MAPCFG.openAllWaypoints||w.id==='kl') S.wp[w.id]=true; });
   spawnMonsters();
   updateHUD(true);
 }
@@ -646,7 +784,7 @@ function addFx(o){ G.fx.push(o); }
 function dmgText(x,y,txt,col){ addFx({ k:'txt', x:x, y:y, txt:txt, col:col||'#fff', t:0, life:0.8 }); }
 
 function doAttack(){
-  if(!G||panelOpen||G.p.atkCD>0) return;
+  if(!G||panelOpen||G.wipe||G.p.atkCD>0) return;
   var p=G.p, st=charStats(activeId()); p.atkCD=0.38;
   addFx({ k:'slash', x:p.x, y:p.y, fx:p.fx, fy:p.fy, t:0, life:0.18 });
   G.mons.forEach(function(m){
@@ -656,7 +794,7 @@ function doAttack(){
   });
 }
 function doSkill(){
-  if(!G||panelOpen||G.p.skCD>0) return;
+  if(!G||panelOpen||G.wipe||G.p.skCD>0) return;
   var p=G.p, id=activeId(), c=CHARS[id], st=charStats(id); p.skCD=6;
   addFx({ k:'ring', x:p.x, y:p.y, col:ELEM[c.el].color, t:0, life:0.55 });
   toast(c.name+': '+c.skill+'!');
@@ -689,24 +827,20 @@ function gainXP(n){
   updateHUD(true);
 }
 function hurtPlayer(dmg){
-  var p=G.p; if(p.inv>0) return;
+  var p=G.p; if(p.inv>0||G.wipe) return;
   var id=activeId(); G.hp[id]=Math.max(0,G.hp[id]-dmg); p.inv=0.7; G.calm=0;
   dmgText(p.x,p.y-34,'-'+dmg,'#ff6b6b');
   if(G.hp[id]<=0){
+    G.down[id]=REVIVE_SOLO_SEC;     // they nap, then wake up on their own
     var next=-1; for(var i=0;i<S.party.length;i++) if(G.hp[S.party[i]]>0){ next=i; break; }
-    if(next>=0){ G.active=next; toast(CHARS[id].name+' is tired! '+CHARS[S.party[next]].name+' steps in.'); }
-    else {
-      toast('Everyone is sleepy... Mak\u2019s teh tarik revived the team!');
-      S.party.forEach(function(pid){ G.hp[pid]=charStats(pid).hp; }); G.active=0;
-      p.x=(SPAWN.x+0.5)*TS; p.y=(SPAWN.y+0.5)*TS;
-      G.mons.forEach(function(m){ if(!m.dead){ m.x=m.hx; m.y=m.hy; m.hp=m.max; } });
-    }
+    if(next>=0){ G.active=next; toast(CHARS[id].name+' dozed off and wakes in '+REVIVE_SOLO_SEC+'s. '+CHARS[S.party[next]].name+' steps in.'); }
+    else startWipe();               // whole team asleep: everyone wakes at the nearest waypoint - no restart, nothing is lost
   }
   updateHUD(true);
 }
 function switchTo(i){
-  if(!G||panelOpen||i>=S.party.length||i===G.active||G.p.swapCD>0) return;
-  if(G.hp[S.party[i]]<=0){ toast(CHARS[S.party[i]].name+' needs a rest first.'); return; }
+  if(!G||panelOpen||G.wipe||i>=S.party.length||i===G.active||G.p.swapCD>0) return;
+  if(G.hp[S.party[i]]<=0){ toast(CHARS[S.party[i]].name+' is resting \u2014 wakes in '+Math.ceil(G.down[S.party[i]]||0)+'s.'); return; }
   G.active=i; G.p.swapCD=0.5; updateHUD(true);
 }
 function stepMove(ent,dx,dy,r){ if(canStand(ent.x+dx,ent.y,r)) ent.x+=dx; if(canStand(ent.x,ent.y+dy,r)) ent.y+=dy; }
@@ -714,6 +848,19 @@ function stepMove(ent,dx,dy,r){ if(canStand(ent.x+dx,ent.y,r)) ent.x+=dx; if(can
 function update(dt){
   if(!G||panelOpen) return;
   var p=G.p; G.t+=dt;
+  // revive timers: a friend who dozed off wakes by themselves - nobody is ever stuck
+  var woke=false;
+  Object.keys(G.down).forEach(function(id){
+    if(G.hp[id]>0){ delete G.down[id]; return; }
+    G.down[id]-=dt;
+    if(G.down[id]<=0 && !G.wipe){ reviveMember(id,REVIVE_SOLO_HP,false); woke=true; }
+  });
+  if(woke) updateHUD(true);
+  if(G.wipe){                       // short "everyone is sleepy" moment, then back up at a waypoint
+    G.wipe.t-=dt; G.fx=G.fx.filter(function(f){ f.t+=dt; return f.t<f.life; });
+    if(G.wipe.t<=0) finishWipe();
+    return;
+  }
   var ix=(keys.right?1:0)-(keys.left?1:0)+touch.dx, iy=(keys.down?1:0)-(keys.up?1:0)+touch.dy;
   var mag=Math.hypot(ix,iy);
   p.moving=mag>0.12;
@@ -753,6 +900,8 @@ function update(dt){
   // slow regen when calm
   G.calm+=dt;
   if(G.calm>5){ S.party.forEach(function(id){ var mx=charStats(id).hp; if(G.hp[id]>0&&G.hp[id]<mx) G.hp[id]=Math.min(mx,G.hp[id]+mx*0.02*dt); }); }
+  // waypoints that aren't open yet unlock when you walk close to them
+  if(!MAPCFG.openAllWaypoints && Math.floor(G.t*2)!==Math.floor((G.t-dt)*2)) unlockNearbyWaypoints();
   // zone
   var z=zoneOf(Math.floor(p.x/TS),Math.floor(p.y/TS));
   if(z!==G.zone){ G.zone=z; var zl=$('zoneLabel'); zl.textContent='\uD83D\uDCCD '+ZONES[z]; zl.style.opacity=1; clearTimeout(update.zh); update.zh=setTimeout(function(){ zl.style.opacity=0.55; },2500); }
@@ -864,7 +1013,7 @@ function render(time){
       var p=G.p, px=p.x-camx, py=p.y-camy, id=activeId(), bounce=p.moving?Math.abs(Math.sin(p.bob))*5:Math.sin(time*2)*1.2;
       drawEntityShadow(px,py,19);
       ctx.save(); if(p.inv>0 && Math.floor(time*20)%2) ctx.globalAlpha=0.5;
-      drawSprite(img('c',id),px,py+6-bounce,82*(CHARS[id].scale||1),p.flip,ELEM[CHARS[id].el].color); ctx.restore();
+      drawSprite(img('c',id),px,py+6-bounce,92*(CHARS[id].scale||1),p.flip,ELEM[CHARS[id].el].color); ctx.restore();
     }
   });
   // effects
@@ -899,13 +1048,19 @@ function updateHUD(full){
   if(full || pb.childElementCount!==S.party.length || !pb.dataset.sig || pb.dataset.sig!==S.party.join(',')+'|'+G.active){
     pb.dataset.sig=S.party.join(',')+'|'+G.active;
     pb.innerHTML=S.party.map(function(id,i){
-      return '<div class="pm'+(i===G.active?' act':'')+(G.hp[id]<=0?' down':'')+'" data-i="'+i+'"><img src="'+uri('c',id)+'" alt=""><div><div class="nm">'+esc(CHARS[id].name)+' '+ELEM[CHARS[id].el].emoji+'</div><div class="hpb"><i style="width:'+Math.round(100*G.hp[id]/charStats(id).hp)+'%"></i></div></div><span class="k">'+(i+1)+'</span></div>';
+      return '<div class="pm'+(i===G.active?' act':'')+(G.hp[id]<=0?' down':'')+'" data-i="'+i+'"><img src="'+uri('f',id)+'" alt="" style="border-color:'+ELEM[CHARS[id].el].color+'"><div><div class="nm">'+esc(CHARS[id].name)+' '+ELEM[CHARS[id].el].emoji+'</div><div class="hpb"><i style="width:'+Math.round(100*G.hp[id]/charStats(id).hp)+'%"></i></div></div><span class="k">'+(G.hp[id]<=0&&G.down[id]!=null?'\uD83D\uDCA4 '+Math.ceil(G.down[id])+'s':(i+1))+'</span></div>';
     }).join('');
     Array.prototype.forEach.call(pb.querySelectorAll('.pm'),function(el){ el.onclick=function(){ switchTo(+el.dataset.i); }; });
   } else {
     var bars=pb.querySelectorAll('.hpb i');
-    S.party.forEach(function(id,i){ if(bars[i]) bars[i].style.width=Math.round(100*G.hp[id]/charStats(id).hp)+'%'; });
+    var ks=pb.querySelectorAll('.k'), cards=pb.querySelectorAll('.pm');
+    S.party.forEach(function(id,i){
+      if(bars[i]) bars[i].style.width=Math.round(100*G.hp[id]/charStats(id).hp)+'%';
+      if(cards[i]) cards[i].classList.toggle('down',G.hp[id]<=0);
+      if(ks[i]) ks[i].textContent=(G.hp[id]<=0&&G.down[id]!=null)?'\uD83D\uDCA4 '+Math.ceil(G.down[id])+'s':String(i+1);
+    });
   }
+  drawMiniMap();
 }
 
 // ---------------- panels ----------------
@@ -965,7 +1120,7 @@ function openWish(){
   var isC=wishBanner==='char', b=BANNER[wishBanner], rb=isC?RELEASE.banners[wishSub]:null, f=featuredFor(wishBanner,wishSub), fi=isC?CHARS[f]:WEAPS[f];
   var art=isC?uri('c',f):uri('w',f), title=isC?rb.title:b.title, sub=isC?'Character Event Wish':b.sub;
   var banners=isC?'<div class="tabs">'+RELEASE.banners.map(function(x,i){ return '<button class="tab'+(i===wishSub?' on':'')+'" data-c="'+i+'">'+esc(x.title)+'</button>'; }).join('')+'</div>':'';
-  var fours=isC?'<div class="note" style="margin-top:8px">Featured 4\u2605 (shared by both banners): '+FOUR_CHARS.map(function(id){ return '<span style="display:inline-flex;align-items:center;gap:4px;margin-right:10px"><img src="'+uri('c',id)+'" alt="" style="width:24px;height:32px;object-fit:contain">'+esc(CHARS[id].name)+'</span>'; }).join('')+'</div>':'';
+  var fours=isC?'<div class="note" style="margin-top:8px">Featured 4\u2605 (shared by both banners): '+FOUR_CHARS.map(function(id){ return '<span style="display:inline-flex;align-items:center;gap:4px;margin-right:10px"><img src="'+uri('f',id)+'" alt="" style="width:30px;height:30px;border-radius:50%;object-fit:cover;background:#fff;border:2px solid #fff;box-shadow:0 1px 0 rgba(0,0,0,.25)">'+esc(CHARS[id].name)+'</span>'; }).join('')+'</div>':'';
   var hist=S.hist.slice(0,25).map(function(h){ var nm=h.k==='char'?CHARS[h.id].name:WEAPS[h.id].name; return '<div class="r'+h.rar+'">'+stars(h.rar)+' '+esc(nm)+'</div>'; }).join('')||'<div class="note">No wishes yet.</div>';
   openPanel('<h2>\uD83C\uDF20 Wish</h2><div class="tabs"><button class="tab'+(isC?' on':'')+'" data-b="char">Characters</button><button class="tab'+(!isC?' on':'')+'" data-b="weap">Weapons</button></div>'+banners+
     '<div class="bannerCard"><img src="'+art+'" alt=""><div><div class="note">'+sub+'</div><h2 style="margin:0">'+esc(title)+'</h2><div>Featured 5\u2605: <b>'+esc(fi.name)+'</b></div><div class="note">'+(isC?ELEM[fi.el].emoji+' '+esc(fi.title)+' \u2014 '+esc(rb.hook):esc(fi.desc))+'</div><div class="note">'+Math.round(b.base5*1000)/10+'% 5\u2605 base \u00b7 soft pity from '+b.soft+' \u00b7 guaranteed by '+b.hard+(isC?' \u00b7 pity is shared by both banners':'')+'</div>'+fours+'</div></div>'+
@@ -1046,7 +1201,7 @@ function openSettings(){
   var scope = APP.mode==='cloud'
     ? (subs ? 'Subjects this semester'+(SCOPE.semester?' ('+esc(SCOPE.semester)+')':'')+': <b>'+subs+'</b>. The Study Station only asks questions from these.' : 'No subjects with game questions found for you this semester yet \u2014 you\u2019ll get General Maths practice until your lecturer publishes some.')
     : 'Guest mode: you\u2019ll get General Maths practice. Sign in with Google to get questions from your own subjects.';
-  openPanel('<h2>\u2699\uFE0F Settings</h2><p>Adventurer: <b>'+esc(S.name)+'</b> \u00b7 AR '+S.ar+' \u00b7 '+S.kills+' monsters befriended (defeated)</p><p class="note">Saved '+(APP.mode==='cloud'?'to your account \u2014 play anywhere you sign in.':'on this device only (guest mode).')+'</p><p class="note">'+scope+'</p><p class="note">Total wishes made: '+(S.totalPulls||0)+'</p><div style="display:grid;gap:10px;margin-top:12px"><a class="btn ghost" href="report.html" style="text-decoration:none;text-align:center">\u2190 Back to my results</a>'+(APP.mode==='cloud'?'<button class="btn alt" id="sOut">Sign out</button>':'')+'</div>');
+  openPanel('<h2>\u2699\uFE0F Settings</h2><p>Adventurer: <b>'+esc(S.name)+'</b> \u00b7 AR '+S.ar+' \u00b7 '+S.kills+' monsters befriended (defeated)</p><p class="note">Saved '+(APP.mode==='cloud'?'to your account \u2014 play anywhere you sign in.':'on this device only (guest mode).')+'</p><p class="note">'+scope+'</p><p class="note">Total wishes made: '+(S.totalPulls||0)+'</p><div style="display:grid;gap:10px;margin-top:12px">'+(EMBED?'':'<a class="btn ghost" href="report.html" style="text-decoration:none;text-align:center">\u2190 Back to my results</a>')+(APP.mode==='cloud'&&!EMBED?'<button class="btn alt" id="sOut">Sign out</button>':'')+'</div>');
   if($('sOut')) $('sOut').onclick=function(){ persist().then(function(){ window.firebaseSDK.signOut(auth); location.reload(); }); };
 }
 
@@ -1085,13 +1240,13 @@ function bindInput(){
     if(panelOpen||(e.target&&e.target.tagName==='INPUT')) return;
     if(map[e.code]){ keys[map[e.code]]=true; e.preventDefault(); }
     if(e.code==='KeyE'||e.code==='KeyK') doSkill();
-    if(e.code==='KeyQ') openStudy(); if(e.code==='KeyB') openBag();
+    if(e.code==='KeyQ') openStudy(); if(e.code==='KeyB') openBag(); if(e.code==='KeyM') openMap();
     if(/^Digit[1-4]$/.test(e.code)) switchTo(+e.code.slice(5)-1);
   });
   window.addEventListener('keyup',function(e){ if(map[e.code]) keys[map[e.code]]=false; });
   $('bAtk').addEventListener('pointerdown',function(e){ e.preventDefault(); doAttack(); });
   $('bSkill').addEventListener('pointerdown',function(e){ e.preventDefault(); doSkill(); });
-  $('bStudy').onclick=openStudy; $('bWish').onclick=function(){ openWish(); }; $('bBag').onclick=openBag; $('bSet').onclick=openSettings;
+  $('miniMap').onclick=openMap; $('bStudy').onclick=openStudy; $('bWish').onclick=function(){ openWish(); }; $('bBag').onclick=openBag; $('bSet').onclick=openSettings;
   var st=$('stick'), kn=$('knob');
   function stickMove(e){ var r=st.getBoundingClientRect(), cx=r.left+r.width/2, cy=r.top+r.height/2, dx=(e.clientX-cx)/(r.width/2), dy=(e.clientY-cy)/(r.height/2), m=Math.hypot(dx,dy); if(m>1){ dx/=m; dy/=m; } touch.dx=dx; touch.dy=dy; kn.style.left=(41+dx*38)+'px'; kn.style.top=(41+dy*38)+'px'; }
   st.addEventListener('pointerdown',function(e){ touch.id=e.pointerId; st.setPointerCapture(e.pointerId); stickMove(e); });
@@ -1103,6 +1258,12 @@ function bindInput(){
   setInterval(function(){ if(S&&dirty) persist(); },5000);
 }
 
+// The dashboard tells us when the tab is shown again (the iframe was hidden): re-measure the canvas.
+window.addEventListener('message',function(e){
+  if(e.origin!==location.origin) return;
+  if(e.data && e.data.type==='iq-visible'){ resize(); if(G&&S) updateHUD(true); try{ window.focus(); }catch(err){} }
+});
+
 // ---- auth wiring ----
 function initFirebase(retries){
   if(!window.firebaseSDK){
@@ -1110,7 +1271,7 @@ function initFirebase(retries){
     setTimeout(function(){ initFirebase(retries-1); },250); return;
   }
   try{
-    firebaseApp=window.firebaseSDK.initializeApp(FIREBASE_CONFIG,'impianQuestApp');
+    firebaseApp = (FROM==='mentoring') ? window.firebaseSDK.initializeApp(FIREBASE_CONFIG,'mentorMenteeApp') : window.firebaseSDK.initializeApp(FIREBASE_CONFIG);
     auth=window.firebaseSDK.getAuth(firebaseApp); db=window.firebaseSDK.getFirestore(firebaseApp);
   }catch(e){ setStatus('loginStatus','Firebase setup problem: '+e.message); return; }
   window.firebaseSDK.onAuthStateChanged(auth,function(user){
@@ -1151,7 +1312,7 @@ window.__IQ={ CHARS:CHARS, WEAPS:WEAPS, CHAR_LIST:CHAR_LIST, WEAP_LIST:WEAP_LIST
   step:function(dt,n){ for(var i=0;i<(n||1);i++){ update(dt); } },
   render:function(){ render(1); },
   state:function(){ return S; }, game:function(){ return G; }, map:function(){ return map; }, reach:function(){ return reach; },
-  setQs:function(q){ SUBJECT_Q=q; }, RELEASE:RELEASE, featuredFor:featuredFor, isReleased:isReleased, FIVE_CHARS:FIVE_CHARS, FOUR_CHARS:FOUR_CHARS, STARTERS:function(){ return STARTERS; }, setWish:function(b,sub){ wishBanner=b; wishSub=sub||0; }, pickSemester:pickSemester, scope:function(){ return SCOPE; }, subjectQs:function(){ return SUBJECT_Q; }, loadQs:loadSubjectQuestions, setApp:function(m,e){ APP.mode=m; APP.email=e; }, nextQuestion:nextQuestion, answer:answer, keys:keys, doAttack:doAttack, doSkill:doSkill, hurt:hurtPlayer, killAll:function(){ G.mons.forEach(function(m){ if(!m.dead) killMon(m); }); },
+  setQs:function(q){ SUBJECT_Q=q; }, waypoints:function(){ return WPS; }, MAPCFG:MAPCFG, teleportTo:teleportTo, openMap:openMap, selectWaypoint:selectWaypoint, nearestWaypoint:nearestWaypoint, wpUnlocked:wpUnlocked, REVIVE:{ solo:REVIVE_SOLO_SEC, soloHp:REVIVE_SOLO_HP, wipe:WIPE_SEC, wipeHp:WIPE_HP }, RELEASE:RELEASE, featuredFor:featuredFor, isReleased:isReleased, FIVE_CHARS:FIVE_CHARS, FOUR_CHARS:FOUR_CHARS, STARTERS:function(){ return STARTERS; }, setWish:function(b,sub){ wishBanner=b; wishSub=sub||0; }, pickSemester:pickSemester, scope:function(){ return SCOPE; }, subjectQs:function(){ return SUBJECT_Q; }, loadQs:loadSubjectQuestions, setApp:function(m,e){ APP.mode=m; APP.email=e; }, nextQuestion:nextQuestion, answer:answer, keys:keys, doAttack:doAttack, doSkill:doSkill, hurt:hurtPlayer, killAll:function(){ G.mons.forEach(function(m){ if(!m.dead) killMon(m); }); },
   openStudy:openStudy, openWish:openWish, openBag:openBag, openSettings:openSettings, runWish:runWish, constants:{ MW:MW, MH:MH, TS:TS, SPAWN:SPAWN }
 };
 })();
