@@ -671,6 +671,50 @@ th.sortable:hover { color: var(--ink); }
   .top-tab { padding: 12px 11px; font-size: 0.84rem; }
 }
 
+
+/* ---- Intake table: the leading columns stay in view when scrolling sideways ----
+   Frozen: checkbox (admins only), name, ID and status. Widths are fixed so every
+   column's "left" offset is known; they're variables so a phone can shrink them.
+   Separate (not collapsed) borders, because row borders on sticky cells go
+   missing in the collapsed model. */
+#intake-table table.data.frozen {
+  border-collapse: separate; border-spacing: 0;
+  --w-check: 44px; --w-name: 190px; --w-id: 124px; --w-status: 100px; --off: 0px;
+}
+#intake-table table.data.frozen.has-select { --off: var(--w-check); }
+/* Layers: frozen header (4) > scrolling header (3) > frozen body cells (2) > everything else. */
+#intake-table table.data.frozen th { z-index: 3; }
+#intake-table table.data.frozen .fz { position: sticky; box-sizing: border-box; background: var(--paper-raised); z-index: 2; }
+#intake-table table.data.frozen th.fz { background: #dceadd; z-index: 4; }
+#intake-table table.data.frozen .fz-check  { left: 0; width: var(--w-check); min-width: var(--w-check); max-width: var(--w-check); }
+#intake-table table.data.frozen .fz-name   { left: var(--off); width: var(--w-name); min-width: var(--w-name); max-width: var(--w-name); white-space: normal; }
+#intake-table table.data.frozen .fz-id     { left: calc(var(--off) + var(--w-name)); width: var(--w-id); min-width: var(--w-id); max-width: var(--w-id); }
+#intake-table table.data.frozen .fz-status { left: calc(var(--off) + var(--w-name) + var(--w-id)); width: var(--w-status); min-width: var(--w-status); max-width: var(--w-status); }
+#intake-table table.data.frozen .fz-label  { left: 0; white-space: normal; }
+#intake-table table.data.frozen td.fz-name button { white-space: normal; text-align: left; }
+/* The app's general rule gives every input inside a table cell min-width: 56px, which
+   is wider than this column and got the checkbox clipped. Here the checkbox simply fills
+   the narrow column (44px wide, but the tick box itself stays its normal 13px size), centred under the header's select-all. */
+#intake-table table.data.frozen td.fz-check, #intake-table table.data.frozen th.fz-check { padding-left: 0; padding-right: 0; text-align: center; }
+#intake-table table.data.frozen td.fz-check input { width: 100%; min-width: 0; height: 13px; margin: 0; padding: 0; cursor: pointer; }
+/* the edge of the frozen block */
+#intake-table table.data.frozen .fz-last { border-right: 1px solid var(--line-strong); box-shadow: 5px 0 6px -4px rgba(28, 43, 69, 0.22); }
+/* a hovered row tints its frozen cells too (they have their own opaque background) */
+#intake-table table.data.frozen tbody tr:hover td.fz { background: #f7f3e9; }
+/* with separate borders, keep the dividers around the count rows the same thickness as before */
+#intake-table table.data.frozen tr.summary-row td { border-top: 1px solid var(--line); }
+#intake-table table.data.frozen tr.summary-row + tr.summary-row td { border-top: 0; }
+
+/* Phone / narrow window: freezing ~450px would leave almost nothing to scroll,
+   so only the checkbox and name stay pinned; ID and status scroll away. */
+@media (max-width: 860px) {
+  #intake-table table.data.frozen { --w-check: 36px; --w-name: 128px; }
+  #intake-table table.data.frozen .fz-id,
+  #intake-table table.data.frozen .fz-status { left: auto; }
+  #intake-table table.data.frozen .fz-label { position: static; }
+  #intake-table table.data.frozen .fz-last { border-right: 0; box-shadow: none; }
+  #intake-table table.data.frozen .fz-name { border-right: 1px solid var(--line-strong); box-shadow: 5px 0 6px -4px rgba(28, 43, 69, 0.22); }
+}
 </style>
 </head>
 <body>
@@ -2380,8 +2424,8 @@ function renderIntakeView() {
 
   const thead = `
     <tr>
-      ${isAdmin() ? '<th class="checkbox-cell"><input type="checkbox" id="select-all-checkbox"></th>' : ''}
-      <th>Student's Name</th><th>Student ID</th><th>Status</th>
+      ${isAdmin() ? '<th class="checkbox-cell fz fz-check"><input type="checkbox" id="select-all-checkbox"></th>' : ''}
+      <th class="fz fz-name">Student's Name</th><th class="fz fz-id">Student ID</th><th class="fz fz-status fz-last">Status</th>
       <th>Total Cum GP</th><th>Total Cum GP (excl. repeat)</th>
       <th>Total Cum Ct</th><th>Total Cum Ct (excl. repeat)</th>
       <th>Total Cum Ct (incl. MPU)</th>
@@ -2396,10 +2440,10 @@ function renderIntakeView() {
       ? `<span class="pill good">Eligible</span>` : `<span class="pill warn">Not Eligible</span>`;
     const yetToTake = getSubjectsYetToTake(r.studentId);
     return `<tr class="clickable" data-student="${r.studentId}">
-      ${isAdmin() ? `<td class="checkbox-cell" data-no-nav="1"><input type="checkbox" class="row-select" data-student="${r.studentId}" ${selectedStudentIds.has(r.studentId) ? 'checked' : ''}></td>` : ''}
-      <td class="name-cell"><button>${escapeHtml(r.name)}</button></td>
-      <td>${r.studentId}</td>
-      <td>${statusPill(r.status)}</td>
+      ${isAdmin() ? `<td class="checkbox-cell fz fz-check" data-no-nav="1"><input type="checkbox" class="row-select" data-student="${r.studentId}" ${selectedStudentIds.has(r.studentId) ? 'checked' : ''}></td>` : ''}
+      <td class="name-cell fz fz-name"><button>${escapeHtml(r.name)}</button></td>
+      <td class="fz fz-id">${r.studentId}</td>
+      <td class="fz fz-status fz-last">${statusPill(r.status)}</td>
       <td>${s.totalCumGradePoint}</td><td>${s.totalCumGradePointExclRepeat}</td>
       <td>${s.totalCumCt}</td><td>${s.totalCumCtExclRepeat}</td>
       <td>${s.totalCumCtInclMPU}</td>
@@ -2421,10 +2465,16 @@ function renderIntakeView() {
   // Probation that semester — the same students and the same colours as
   // the cells above, so the numbers always match what's highlighted.
   const leadingCols = (isAdmin() ? 1 : 0) + 8;
+  // The label cell covers just the frozen columns (checkbox, name, ID, status)
+  // so it can stay in view; the rest of the old 9-column span is a plain cell.
+  // (One cell spanning all 9 would be pinned at its full ~1,000px width and
+  // cover the GPA columns when scrolled.)
+  const frozenCols = (isAdmin() ? 1 : 0) + 3;
   const trailingCols = 7; // CGPA Temp, CGPA Final, Eligibility, Pending resit, Pending retake, Termination, Yet to be taken
   const standingCount = (n, which) => rows.filter(r => gpaStanding(r.summary.gpaBySemester[n], r.summary.creditHoursBySemester[n]) === which).length;
   const summaryRow = (cls, label, which) => `<tr class="summary-row">
-      <td colspan="${leadingCols}"><span class="standing-swatch gpa-${cls}"></span>${label}</td>
+      <td class="fz fz-label fz-last" colspan="${frozenCols}"><span class="standing-swatch gpa-${cls}"></span>${label}</td>
+      <td colspan="${leadingCols - frozenCols}"></td>
       ${semCols.map(n => `<td class="gpa-${cls}">${standingCount(n, which)}</td>`).join('')}
       <td colspan="${trailingCols}"></td>
     </tr>`;
@@ -2435,7 +2485,7 @@ function renderIntakeView() {
     : '';
 
   document.getElementById('intake-table').innerHTML = students.length
-    ? `<table class="data"><thead>${thead}</thead><tbody>${tbody}${summaryRows}</tbody></table>`
+    ? `<table class="data frozen${isAdmin() ? ' has-select' : ''}"><thead>${thead}</thead><tbody>${tbody}${summaryRows}</tbody></table>`
     : allStudents.length
       ? `<div class="empty-state">No students match this filter. <button class="btn small" id="clear-status-filter">Show all statuses</button></div>`
       : `<div class="empty-state">No students in this intake yet.</div>`;
@@ -2985,6 +3035,14 @@ function renderAuditView() {
       — all now give the same result) and against all 38 real students: attempt labels, GPA statuses, semester
       GPAs, resit/retake lists, CGPA and credit hours are unchanged for every one — the fix only alters cases
       where the order was ambiguous.</p>
+    </div>
+    <div class="audit-item open">
+      <strong>Intake table: the first columns stay in view when you scroll sideways</strong><span class="tag">Added</span>
+      <p>The intake table is far wider than a screen, so scrolling right used to carry the student's name off with
+      it. The checkbox (admins), Student's Name, Student ID and Status columns are now frozen, so you always see whose
+      row you're reading; the three President's / Dean's / Probation count rows at the bottom keep their label in view
+      too. On a phone the freeze is limited to the checkbox and name, so there's still room to scroll. Display only
+      &mdash; no data, calculation or Firebase change.</p>
     </div>
     <div class="audit-item open">
       <strong>Fixed: a GPA that lands exactly half-way (x.xx5) could round the wrong way</strong><span class="tag">Fixed</span>
