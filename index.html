@@ -715,6 +715,10 @@ th.sortable:hover { color: var(--ink); }
   #intake-table table.data.frozen .fz-last { border-right: 0; box-shadow: none; }
   #intake-table table.data.frozen .fz-name { border-right: 1px solid var(--line-strong); box-shadow: 5px 0 6px -4px rgba(28, 43, 69, 0.22); }
 }
+
+/* ---- referral exams ---- */
+tr.row-aside td { color: var(--muted); }
+tr.row-aside td .pill, tr.row-aside td button { opacity: 0.75; }
 </style>
 </head>
 <body>
@@ -1315,7 +1319,52 @@ function deriveRecord(raw) {
   };
 }
 
-function computeStudentSummary(records, config = ENGINE_CONFIG) {
+// ---------------------------------------------------------------------------
+// REFERRAL EXAMS
+// A student who was absent from the final exam for an accepted reason (a
+// medical certificate, say) sits a referral exam. That is NOT a resit or a
+// retake: it is the student's first real sitting of the subject, graded at its
+// full natural grade (never capped), and whatever was entered for the missed
+// exam is not an attempt. A record carries `referral: true` for that sitting.
+//
+// The earlier entry is set aside by DERIVATION — here, at calculation and
+// display time — and nothing in the database is rewritten. So the result is the
+// same whichever order the two were entered in, and the same whether or not the
+// absent entry was ever imported (it is simply not needed).
+//
+// Set aside: every other sitting of that subject in an EARLIER semester, or in
+// the same semester unless it resolves something (a resit that follows a failed
+// referral exam is a real sitting and stays). When a subject has several
+// referral records, only the latest one stands.
+function getSetAsideRecords(records) {
+  const aside = new Set(), bySubject = new Map();
+  for (const r of records) {
+    if (!bySubject.has(r.subjectCode)) bySubject.set(r.subjectCode, []);
+    bySubject.get(r.subjectCode).push(r);
+  }
+  for (const list of bySubject.values()) {
+    const referrals = list.filter(r => r.referral === true);
+    if (!referrals.length) continue;
+    const standing = [...referrals].sort(compareSittings).pop();
+    for (const r of list) {
+      if (r === standing) continue;
+      if (r.semester < standing.semester || (r.semester === standing.semester && !isResolvingRecord(r))) aside.add(r);
+    }
+  }
+  return aside;
+}
+// A referral exam is a plain first sitting, so none of the resit bookkeeping
+// applies to it — a stray removed-points amount or resolve marker (from having
+// been entered as a resit by mistake) must not net anything off.
+function withoutNetting(r) {
+  return { ...r, removedGradePoints: 0, resolvesPriorAttempt: false, stillFailing: false, keptHigherPriorGrade: false };
+}
+
+function computeStudentSummary(allRecords, config = ENGINE_CONFIG) {
+  const setAside = getSetAsideRecords(allRecords);
+  const records = allRecords.filter(r => !setAside.has(r)).map(r => r.referral === true ? withoutNetting(r) : r);
+  const setAsideById = {};
+  for (const r of setAside) if (r.id != null) setAsideById[r.id] = true;
   const notMPU = (r) => !isMPU(r.subjectCode);
   // A record "resolves" an earlier failed attempt either the historical way
   // (a nonzero removedGradePoints — how every existing record is marked) or
@@ -1510,7 +1559,7 @@ function computeStudentSummary(records, config = ENGINE_CONFIG) {
   return {
     totalCumGradePoint, totalCumGradePointExclRepeat, totalCumCt, totalCumCtExclRepeat,
     totalCumCtInclMPU, gpaBySemester, creditHoursBySemester, gpaStatusById, autoNetById, cgpaTemporary, cgpaFinal, eligibility,
-    repeatCount, pendingRetakeSubjects, pendingResitSubjects, terminationTriggers, semesters,
+    repeatCount, pendingRetakeSubjects, pendingResitSubjects, terminationTriggers, semesters, setAsideById,
   };
 }
 
@@ -2157,7 +2206,9 @@ function getSubjectsYetToTake(studentId) {
 function findPendingRetake(studentId, subjectCode, excludeId = null) {
   const code = String(subjectCode || '').trim().toUpperCase();
   if (!code) return null;
-  const recs = getStudentRecords(studentId).filter(r => r.id !== excludeId);
+  const all = getStudentRecords(studentId);
+  const aside = getSetAsideRecords(all); // an absent entry that a referral exam has replaced is not a pending attempt
+  const recs = all.filter(r => r.id !== excludeId && !aside.has(r));
   // A failed attempt counts as pending whether or not it carries the
   // needs-retake flag: a Fail-grade sitting that isn't a failed resit
   // (stillFailing) or a row that resolves something. Without this, a first
@@ -2188,8 +2239,10 @@ function getSubjectAttempts(studentId, subjectCode) {
   // broke down when both rows looked alike (a leftover 1e-7 on the failing
   // row): the order then depended on how they were stored, and a pass could
   // be labelled the earlier attempt with the fail as its "resit".
-  return getStudentRecords(studentId)
-    .filter(r => r.subjectCode === subjectCode)
+  const all = getStudentRecords(studentId);
+  const aside = getSetAsideRecords(all); // a referral exam is the first real sitting; the absent entry before it is not an attempt
+  return all
+    .filter(r => r.subjectCode === subjectCode && !aside.has(r))
     .sort(compareSittings);
 }
 
@@ -2537,6 +2590,7 @@ function renderStudentView() {
   studentPendingResit = new Set(s.pendingResitSubjects);
   studentGpaStatus = s.gpaStatusById;
   studentAutoNet = s.autoNetById;
+  studentSetAside = s.setAsideById;
 
   document.getElementById('back-to-intake').textContent = state.returnTo === 'performance' ? '\u2190 Back to performance summary' : '\u2190 Back to intake';
   document.getElementById('student-name').textContent = name;
@@ -2635,8 +2689,11 @@ let studentPendingResit = new Set();
 let studentGpaStatus = {};
 // Per-record amount netted automatically (summary.autoNetById), same idea.
 let studentAutoNet = {};
+// Records a referral exam has set aside (summary.setAsideById), same idea.
+let studentSetAside = {};
 
 function gpaStatusCell(status) {
+  if (status === 'aside') return '<span class="gpa-out" title="The student was absent from this exam for an accepted reason and has since sat the referral exam, so this entry is not an attempt and is left out of every calculation.">No \u2014 absent (referral taken)</span>';
   if (status === 'resit') return '<span class="gpa-out" title="A later sitting of this subject in the same semester (a resit). Semester GPA follows the first attempt, so this row is left out of it.">No — resit</span>';
   if (status === 'mpu') return '<span class="gpa-out" title="MPU subjects are outside GPA for this batch.">No — MPU</span>';
   if (status === 'counts') return '<span class="gpa-in">Yes</span>';
@@ -2658,7 +2715,7 @@ function renderRecordRow(r) {
       <td><input type="number" class="e-marks" value="${r.marks}" min="0" max="100"></td>
       <td colspan="2" style="color:var(--muted);font-size:0.76rem">computed on save</td>
       <td></td>
-      <td></td>
+      <td><label style="font-size:0.74rem;color:var(--muted);white-space:normal" title="Tick if the student was absent from the final for an accepted reason (e.g. MC) and this is the referral exam. It is then graded at its full natural grade, is not a resit or retake, and any earlier absent entry for this subject is set aside."><input type="checkbox" class="e-referral" ${r.referral === true ? 'checked' : ''}> Referral exam</label></td>
       <td><input type="checkbox" class="e-retake" ${isRetake ? 'checked' : ''}></td>
       <td><input type="number" class="e-removed" value="${r.removedGradePoints || 0}" step="0.01"></td>
       <td class="row-actions">
@@ -2696,16 +2753,24 @@ function renderRecordRow(r) {
   // outcome under the C- cap policy, not something that needs the same
   // visual alarm as a student who's needed repeated sittings.
   const attemptNoteStyle = isSevere ? 'color:var(--warn);font-weight:600' : 'color:var(--muted)';
-  const attemptNote = attemptInfo.totalAttempts > 1
+  const attemptNoteBase = attemptInfo.totalAttempts > 1
     ? `<br><span style="${attemptNoteStyle};font-size:0.72rem">attempt ${attemptInfo.attemptNumber} of ${attemptInfo.totalAttempts}${attemptInfo.attemptNumber === attemptInfo.totalAttempts && !isRetake ? afterText : ''}${isSevere ? ' ⚠' : ''}</span>`
     : '';
-  return `<tr>
+  // Referral exam: the student's first real sitting, so it is labelled by its outcome
+  // rather than as a resit or retake. The absent entry it replaced stays visible but
+  // is marked as not an attempt.
+  const isAside = !!studentSetAside[r.id];
+  const referralNote = r.referral === true
+    ? `<br><span style="color:${didFail ? 'var(--warn)' : 'var(--good)'};font-size:0.72rem;font-weight:600">${didFail ? 'failed' : 'passed'} referral exam</span>` : '';
+  const asideNote = '<br><span style="color:var(--muted);font-size:0.72rem">absent \u2014 referral exam taken</span>';
+  const attemptNote = isAside ? asideNote : attemptNoteBase + referralNote;
+  return `<tr${isAside ? ' class="row-aside"' : ''}>
     <td>Sem ${r.semester}</td>
     <td>${escapeHtml(r.subjectCode)}${wasRemapped ? `<br><span style="color:var(--muted);font-size:0.72rem">was ${escapeHtml(r.originalSubjectCode)}${r.originalCreditHour ? `, ${r.originalCreditHour} ct hr` : ''}</span>` : ''}${attemptNote}</td>
     <td>${r.creditHour}</td>
     <td>${r.marks}</td><td>${r.grade}${r.achievement ? `<br><span style="color:var(--muted);font-size:0.72rem">${r.achievement}</span>` : ''}</td><td>${r.gradePoint}</td><td>${r.totalGradePoint}</td>
-    <td>${gpaStatusCell(studentGpaStatus[r.id])}</td>
-    <td>${isRetake || r.stillFailing ? (studentPendingResit.has(r.subjectCode) ? 'Resit' : 'Yes') : '—'}</td>
+    <td>${gpaStatusCell(isAside ? 'aside' : studentGpaStatus[r.id])}</td>
+    <td>${!isAside && (isRetake || r.stillFailing) ? (studentPendingResit.has(r.subjectCode) ? 'Resit' : 'Yes') : '—'}</td>
     <td>${round2(r.removedGradePoints || 0) ? round2(r.removedGradePoints) : (studentAutoNet[r.id] != null ? `<span title="Netted automatically: this sitting cleared the subject, so the earlier failed attempt's grade points no longer count toward CGPA (Temporary).">${studentAutoNet[r.id]} <span class="auto-tag">auto</span></span>` : '—')}</td>
     <td class="row-actions">${isAdmin() ? `
       <button class="btn small" data-edit="${r.id}">Edit</button>
@@ -2746,6 +2811,8 @@ function wireRecordRowEvents() {
     btn.addEventListener('click', async () => {
       const row = btn.closest('tr');
       const subjectCode = row.querySelector('.e-subject').value.trim().toUpperCase();
+      const isReferral = row.querySelector('.e-referral').checked;
+      const wasReferral = (Store.records.find(r => r.id === btn.dataset.save) || {}).referral === true;
       const patch = {
         semester: Number(row.querySelector('.e-sem').value),
         subjectCode,
@@ -2754,7 +2821,16 @@ function wireRecordRowEvents() {
         needRetake: row.querySelector('.e-retake').checked ? 1 : 0,
         removedGradePoints: round2(Number(row.querySelector('.e-removed').value) || 0),
       };
-      if (!patch.needRetake && findPendingRetake(state.studentId, subjectCode, btn.dataset.save)) patch.resolvesPriorAttempt = true;
+      // The flag is only written when it is being ticked or cleared, so an ordinary
+      // edit leaves the record's stored fields exactly as before.
+      if (isReferral || wasReferral) patch.referral = isReferral;
+      if (isReferral) {
+        // A referral exam is a plain first sitting: flagged only if it is itself a fail,
+        // and none of the resit bookkeeping applies.
+        patch.needRetake = failsOutright(patch.marks) ? 1 : 0;
+        patch.removedGradePoints = 0;
+        patch.resolvesPriorAttempt = false; patch.stillFailing = false; patch.keptHigherPriorGrade = false;
+      } else if (!patch.needRetake && findPendingRetake(state.studentId, subjectCode, btn.dataset.save)) patch.resolvesPriorAttempt = true;
       const validationError = validateRecordInput(patch);
       if (validationError) { showToast(validationError, true); return; }
       const id = btn.dataset.save;
@@ -2767,7 +2843,7 @@ function wireRecordRowEvents() {
       // a new resolved row the way "Add result" -> Resit does. Only warn on
       // this specific transition — a same-status correction (still capped,
       // just fixing a typo'd mark) is a legitimate, safe use of Edit.
-      if (before && (before.needRetake === 1 || before.needRetake === true) && !patch.needRetake) {
+      if (before && (before.needRetake === 1 || before.needRetake === true) && !patch.needRetake && !patch.referral) {
         const proceed = confirm(
           'This result is currently marked as needing a retake. Saving will replace it in place '
           + 'with these new marks, with no separate record of the original attempt.\n\n'
@@ -2810,10 +2886,13 @@ function findUnflaggedFailures() {
     const last = all.filter(x => x.studentId === r.studentId && x.subjectCode === r.subjectCode).sort(compareSittings).pop();
     return last && last !== r && last.achievement !== 'Fail' && !(last.needRetake === 1 || last.needRetake === true);
   };
+  const asideByStudent = {};
+  const isSetAside = (r) => (asideByStudent[r.studentId] = asideByStudent[r.studentId] || getSetAsideRecords(all.filter(x => x.studentId === r.studentId))).has(r);
   return all.filter(r => r.achievement === 'Fail'
     && !(r.needRetake === 1 || r.needRetake === true)
     && !r.stillFailing && !isResolvingRecord(r)
-    && !clearedByLaterPass(r));   // subject already passed on a later sitting: nothing is missing from the pending lists
+    && !clearedByLaterPass(r)
+    && !isSetAside(r));   // the absent entry a referral exam replaced isn't missing from anything   // subject already passed on a later sitting: nothing is missing from the pending lists
 }
 
 function renderAuditView() {
@@ -3035,6 +3114,23 @@ function renderAuditView() {
       — all now give the same result) and against all 38 real students: attempt labels, GPA statuses, semester
       GPAs, resit/retake lists, CGPA and credit hours are unchanged for every one — the fix only alters cases
       where the order was ambiguous.</p>
+    </div>
+    <div class="audit-item open">
+      <strong>New choice: Referral exam (absent from the final for an accepted reason)</strong><span class="tag">Added</span>
+      <p>A student absent from the final exam with an accepted reason (a medical certificate, say) sits a
+      <em>referral exam</em>, which is not a resit or a retake. It is now a choice wherever a result is classified
+      &mdash; the PDF import's per-row dropdown, the single-result review step, and a <strong>Referral exam</strong> tick
+      when editing a result. A referral result is the student's first real sitting: graded at its full natural grade
+      (never capped at C-), not counted as a resit, retake or extra attempt, and labelled
+      <em>passed referral exam</em> or <em>failed referral exam</em> on the student page. A failed referral then goes on
+      like any failed first sitting (resit or retake).</p>
+      <p>Whatever was entered for the missed exam &mdash; typically the absent row imported as a fail &mdash; is set
+      aside by calculation only, so <strong>nothing in the database is rewritten</strong>, and the numbers come out the
+      same whichever order the two were entered in (checked across all 120 orderings, and against a plain first
+      sitting in every scenario, including a failed referral followed by a retake or a same-semester resit). Set Sem to
+      the semester of the <em>missed</em> exam: the result counts in that semester's GPA. For an absent row the CMS marks
+      ABSENT or DEFERRED, the import now says so; if the absence is accepted, Skip that row until the referral result
+      arrives. Not available in bulk upload; use the Edit tick there.</p>
     </div>
     <div class="audit-item open">
       <strong>Intake table: the first columns stay in view when you scroll sideways</strong><span class="tag">Added</span>
@@ -3987,19 +4083,22 @@ function buildSingleResultPlan(rec) {
 const SINGLE_RESULT_ACTION_LABELS = {
   add: 'First time (add as new)',
   resit: 'Resit (add as new, resolve the earlier attempt)',
+  referral: 'Referral exam (absent with an accepted reason \u2014 not a resit or retake)',
   update: 'Update existing record (same student, subject, and semester)',
 };
 
 function renderAddRecordPreview(plan) {
   const el = document.getElementById('add-record-preview');
   const r = plan.rec;
-  const grade = markToGrade(r.marks, r.needRetake === 1, GRADING_TABLE_JUN2026);
+  // A referral exam is graded at its full natural grade, flagged only if it is itself a fail.
+  const effectiveNeedRetake = plan.action === 'referral' ? (failsOutright(r.marks) ? 1 : 0) : r.needRetake;
+  const grade = markToGrade(r.marks, effectiveNeedRetake === 1, GRADING_TABLE_JUN2026);
   const gradePoint = gradeToPoint(grade, GRADING_TABLE_JUN2026);
   const contextNote = plan.sameSemesterExistingId
     ? 'a result already exists for this student, subject, and semester'
     : plan.hasOtherSemesterHistory ? 'this student has an earlier attempt at this subject on file' : 'no prior record of this subject for this student';
 
-  const options = ['add', 'resit', 'update']
+  const options = ['add', 'resit', 'referral', 'update']
     .filter(a => a !== 'update' || plan.sameSemesterExistingId) // only offer Update when there's something to update
     .map(a => `<option value="${a}" ${plan.action === a ? 'selected' : ''}>${SINGLE_RESULT_ACTION_LABELS[a]}</option>`).join('');
 
@@ -4007,9 +4106,10 @@ function renderAddRecordPreview(plan) {
   el.innerHTML = `
     <div class="mapping-row">
       <span><strong>${escapeHtml(r.name)}</strong> (${r.studentId}) — Sem ${r.semester} · ${escapeHtml(r.subjectCode)} ·
-      marks ${r.marks} → ${grade} (${gradePoint} pts)${r.needRetake ? ' — capped' : ''}</span>
+      marks ${r.marks} → ${grade} (${gradePoint} pts)${plan.action === 'referral' ? '' : (r.needRetake ? ' — capped' : '')}</span>
     </div>
     <p class="note">${contextNote}.</p>
+    ${plan.action === 'referral' ? `<p class="note" style="color:var(--good);font-weight:600">Referral exam: the student's first real sitting, graded at its full natural grade (not capped) and not counted as a resit or retake. Any earlier absent entry for this subject is set aside. Set Sem to the semester of the missed exam.</p>` : ''}
     <div class="field">
       <label for="single-result-action">Treat this as:</label>
       <select id="single-result-action">${options}</select>
@@ -4019,7 +4119,7 @@ function renderAddRecordPreview(plan) {
       <button class="btn" id="cancel-single-result">Cancel</button>
     </div>`;
 
-  document.getElementById('single-result-action').addEventListener('change', (e) => { plan.action = e.target.value; });
+  document.getElementById('single-result-action').addEventListener('change', (e) => { plan.action = e.target.value; renderAddRecordPreview(plan); });
 
   document.getElementById('cancel-single-result').addEventListener('click', () => {
     el.style.display = 'none';
@@ -4028,7 +4128,11 @@ function renderAddRecordPreview(plan) {
 
   document.getElementById('confirm-single-result').addEventListener('click', async () => {
     const finalRec = { ...plan.rec };
-    if (plan.action === 'resit') {
+    if (plan.action === 'referral') {
+      finalRec.referral = true;
+      finalRec.removedGradePoints = 0;
+      finalRec.needRetake = failsOutright(finalRec.marks) ? 1 : 0;
+    } else if (plan.action === 'resit') {
       // Resolved fresh at confirm time, using the same semester-aware
       // check as the categorization above — not whatever the as-you-type
       // hint guessed earlier in the form, which doesn't distinguish same-
@@ -5007,8 +5111,13 @@ function buildPdfResultsPlan(header) {
     else if (pendingPrior || row.cmsResitMarker) defaultAction = 'resit';
     else defaultAction = 'add';
 
+    // The semester of the most recent earlier sitting on file for this subject:
+    // if this row turns out to be a referral exam, it counts in the semester of
+    // the exam that was missed, not the (later) exam period of this PDF.
+    const priorSittings = existingForStudent.filter(r => r.subjectCode === header.subjectCode);
     plan.items.push({
       row, semester, needRetake,
+      priorSittingSemester: priorSittings.length ? Math.max(...priorSittings.map(r => r.semester)) : null,
       sameSemesterExistingId: sameSemesterExisting ? sameSemesterExisting.id : null,
       hasOtherSemesterHistory: !!otherSemesterExisting,
       pendingPrior: pendingPrior ? { marks: pendingPrior.marks, grade: pendingPrior.grade, semester: pendingPrior.semester } : null,
@@ -5047,6 +5156,20 @@ function buildPdfRecord(header, item) {
     // same exam period find this record and land in the same semester.
     examPeriod: header.examPeriod,
   };
+  if (item.action === 'referral') {
+    // A referral exam is the student's first real sitting (they were absent from
+    // the final for an accepted reason): graded at its full natural grade — never
+    // capped — and flagged only if it is itself a fail. No resit bookkeeping.
+    base.referral = true;
+    base.removedGradePoints = 0;
+    base.needRetake = failsOutright(base.marks) ? 1 : 0;
+    // Not stored as this record's exam period: that would make it the "same exam
+    // period" anchor for the student's OTHER subjects in this PDF's period, and
+    // pull them into the (earlier) semester the missed exam belonged to.
+    delete base.examPeriod;
+    base.referralExamPeriod = header.examPeriod;
+    return base;
+  }
   if (item.action === 'resit') {
     // No exclusion here — this action always ADDS a new record rather than
     // replacing sameSemesterExistingId, so that record is never "itself"
@@ -5086,6 +5209,15 @@ function buildPdfRecord(header, item) {
   return base;
 }
 
+// What choosing "Referral exam" means for one imported row, in words.
+function referralPreviewNote(item) {
+  const grade = markToGrade(item.row.marks, false, GRADING_TABLE_JUN2026);
+  const where = item.priorSittingSemester != null
+    ? `The earlier entry (Sem ${item.priorSittingSemester}) is set aside and this counts in Sem ${item.priorSittingSemester}.`
+    : 'No earlier entry on file \u2014 set Sem to the semester of the missed exam.';
+  return `Referral exam: graded at its full natural grade (${grade}, ${gradeToPoint(grade, GRADING_TABLE_JUN2026)} pts) \u2014 not capped, not a resit or retake. ${where}`;
+}
+
 function renderPdfImportPreview(header, plan) {
   const el = document.getElementById('pdf-import-preview');
   const headerInfo = `<p class="note"><strong>${escapeHtml(header.subjectCode)} — ${escapeHtml(header.subjectName)}</strong> · ${escapeHtml(header.program)} · ${escapeHtml(header.examPeriod)} · ${escapeHtml(header.lecturer)}</p>`;
@@ -5097,10 +5229,10 @@ function renderPdfImportPreview(header, plan) {
 
   const ACTION_LABELS = {
     add: 'Add as new', update: 'Update existing record',
-    resit: 'Treat as resit', skip: 'Skip (already on file)',
+    resit: 'Treat as resit', referral: 'Referral exam (absent, accepted reason)', skip: 'Skip (already on file)',
   };
   const rowsHtml = plan.items.map((item, i) => {
-    const options = ['add', 'update', 'resit', 'skip']
+    const options = ['add', 'update', 'resit', 'referral', 'skip']
       .filter(a => a !== 'update' || item.sameSemesterExistingId) // only offer Update when there's something to update
       .map(a => `<option value="${a}" ${item.action === a ? 'selected' : ''}>${ACTION_LABELS[a]}</option>`).join('');
     const contextNote = item.sameSemesterExistingId
@@ -5113,12 +5245,18 @@ function renderPdfImportPreview(header, plan) {
     // Surfaced separately from contextNote above — this is about whether
     // the semester itself looks right, not about add/update/resit/skip.
     const semesterNote = item.semesterNote ? `⚠ ${item.semesterNote}` : '';
+    // The CMS marks some rows ABSENT / DEFERRED. Whether the absence was an accepted
+    // one is the lecturer's call, so nothing is decided here — just point at the choice.
+    const statusNote = ['ABSENT', 'DEFERRED'].includes(String(item.row.examStatus || '').toUpperCase())
+      ? `CMS exam status: ${item.row.examStatus}. If the absence is accepted (MC etc.), don\u2019t import it as a fail \u2014 Skip it, and when the referral exam result arrives choose \u201cReferral exam\u201d.` : '';
     const alertStyle = (item.pendingPrior || item.cmsResitMarker || item.semesterNote) ? ' style="color:var(--warn);font-weight:600"' : '';
     const gradeDisplay = item.cmsResitMarker ? `*${item.row.pdfGrade}` : item.row.pdfGrade;
-    const notesHtml = [semesterNote, contextNote].filter(Boolean).map(n => `<br><span${alertStyle}>${n}</span>`).join('');
+    // Wrapped so they can be hidden if "Referral exam" is chosen: the resit warnings
+    // ("this will resolve the earlier attempt", the calendar semester) no longer apply.
+    const notesHtml = `<span class="pdf-row-notes">${[semesterNote, statusNote, contextNote].filter(Boolean).map(n => `<br><span${alertStyle}>${n}</span>`).join('')}</span>`;
     return `<div class="mapping-row" data-pdf-row="${i}">
       <span style="min-width:150px">${escapeHtml(item.row.name)} (${item.row.studentId})</span>
-      <span class="credit-note">Sem ${item.semester} · marks ${item.row.marks}, ${gradeDisplay}${item.needRetake ? ' — capped' : ''}${(!item.pendingPrior && failsOutright(item.row.marks)) ? ' — below a C, will be marked as needing retake' : ''}${notesHtml}</span>
+      <span class="credit-note">Sem ${item.semester} · marks ${item.row.marks}, ${gradeDisplay}${item.needRetake ? ' — capped' : ''}${(!item.pendingPrior && failsOutright(item.row.marks)) ? ' — below a C, will be marked as needing retake' : ''}${notesHtml}<span class="pdf-referral-note" style="display:none;color:var(--good);font-weight:600"></span></span>
       <select class="pdf-action-select" data-idx="${i}" style="margin-left:auto;font-size:0.78rem;padding:3px 6px">${options}</select>
       <label style="font-size:0.76rem;color:var(--muted)">Sem
         <input type="number" class="pdf-sem-input" data-idx="${i}" value="${item.semester}" min="1" max="7" style="width:44px;padding:3px 5px;margin-left:4px">
@@ -5153,7 +5291,16 @@ function renderPdfImportPreview(header, plan) {
   });
   el.querySelectorAll('.pdf-action-select').forEach(select => {
     select.addEventListener('change', () => {
-      plan.items[Number(select.dataset.idx)].action = select.value;
+      const item = plan.items[Number(select.dataset.idx)];
+      item.action = select.value;
+      const rowEl = select.closest('[data-pdf-row]'), noteEl = rowEl.querySelector('.pdf-referral-note');
+      rowEl.querySelector('.pdf-row-notes').style.display = item.action === 'referral' ? 'none' : '';
+      if (item.action === 'referral') {
+        // Counts in the semester of the missed exam, which is where the earlier entry is.
+        if (item.priorSittingSemester != null) { item.semester = item.priorSittingSemester; rowEl.querySelector('.pdf-sem-input').value = item.semester; }
+        noteEl.style.display = 'inline';
+        noteEl.innerHTML = '<br>' + referralPreviewNote(item);
+      } else { noteEl.style.display = 'none'; noteEl.innerHTML = ''; }
     });
   });
 
@@ -5252,7 +5399,7 @@ function exportExcel() {
     XLSX.utils.book_append_sheet(wb, ws, batch);
 
     // Detail sheet
-    const detailRows = students.flatMap(s => { const autoNet = computeStudentSummary(s.records).autoNetById; return s.records.map(r => {
+    const detailRows = students.flatMap(s => { const sumForDetail = computeStudentSummary(s.records); const autoNet = sumForDetail.autoNetById, asideIds = sumForDetail.setAsideById; return s.records.map(r => {
       const attempt = getAttemptInfo(r.studentId, r);
       return {
         "Student's Name": r.name, 'Student ID': r.studentId, 'Required to Retake': r.needRetake,
@@ -5260,6 +5407,8 @@ function exportExcel() {
         // Netted by the system when a retake cleared the subject and nothing
         // was entered by hand — so this sheet still adds up to CGPA (Temporary).
         'Removed Grade Points (automatic)': autoNet[r.id] != null ? autoNet[r.id] : '',
+        // A referral exam is the first real sitting; the absent entry it replaced is not an attempt.
+        'Sitting Type': r.referral === true ? 'Referral exam' : (asideIds[r.id] ? 'Absent - set aside (referral taken)' : ''),
         'Sem': r.semester, 'Subject Code': r.subjectCode,
         'Ct Hr': r.creditHour, 'Grade': r.grade, 'Total Grade Point': r.totalGradePoint,
         'Attempt': attempt.totalAttempts > 1 ? `${attempt.attemptNumber} of ${attempt.totalAttempts}` : '',
